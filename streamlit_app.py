@@ -188,7 +188,7 @@ def login_page():
     """, unsafe_allow_html=True)
 
     # Main container
-    col1, col2, col3 = st.columns([1, 3, 1])
+    col1, col2, col3 = st.columns([1.9, 1.2, 1.9])
     
     with col2:
         
@@ -559,4 +559,5 @@ if __name__ == "__main__":
             st.write(f"**Logged in: {st.session_state.username}**")
             if st.button("Logout", use_container_width=True):
                 logout()
+
         main()
