@@ -690,7 +690,7 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
 # MAIN APP PAGES
 # ============================================================================
 def show_forecast_page():
-    st.title("🚗 Traffic Crash Risk Forecast for Shelby County")
+    st.title("🏎️ Traffic Crash Risk Forecast for Shelby County")
     
     # Load segmented data for background analysis
     segmented_df = load_segmented_data()
