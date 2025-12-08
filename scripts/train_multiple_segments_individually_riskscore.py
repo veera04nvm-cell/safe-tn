@@ -172,7 +172,7 @@ def prepare_ml_features(df, feature_cols=None):
 class QuantileEnsemble:
     """Ensemble model that predicts mean + confidence intervals"""
     
-    def __init__(self, quantiles=[0.05, 0.5, 0.95]):
+    def __init__(self, quantiles=[0.25, 0.5, 0.95]):
         self.quantiles = quantiles
         self.models = {}
         
@@ -240,7 +240,7 @@ def train_ensemble_with_intervals(X_train, y_train, X_test, y_test):
     print("TRAINING QUANTILE ENSEMBLE MODEL")
     print("="*60)
     
-    quantile_model = QuantileEnsemble(quantiles=[0.05, 0.5, 0.95])
+    quantile_model = QuantileEnsemble(quantiles=[0.25, 0.5, 0.95])
     quantile_model.fit(X_train, y_train)
     
     y_pred_mean, y_pred_lower, y_pred_upper = quantile_model.predict_interval(X_test)
@@ -345,15 +345,19 @@ def comprehensive_evaluation_with_intervals(df, y_test, y_pred_baseline,
     
     return metrics
 
-def predict_future_with_intervals(df, quantile_model, feature_cols, n_weeks=36):
-    """36-week forecast with full Poisson probabilities + risk scoring"""
+def predict_future_with_intervals(df, quantile_model, feature_cols, n_weeks=12):
+    """
+    36-week forecast with Poisson probabilities + DUAL UNCERTAINTY bounds
+    Combines model uncertainty + residual uncertainty (like Document 3)
+    """
     extended_df = df.copy()
     last_date = df['week_start'].max()
     seasonal_mean = df.groupby('week_of_year')['total_crashes'].mean()
     overall_mean = df['total_crashes'].mean()
+    overall_std = df['total_crashes'].std()
 
     print("\n" + "="*70)
-    print(f"GENERATING {n_weeks}-WEEK FORECAST WITH POISSON RISK SCORING")
+    print(f"GENERATING {n_weeks}-WEEK FORECAST WITH DUAL UNCERTAINTY")
     print("="*70)
 
     predictions = []
@@ -394,28 +398,92 @@ def predict_future_with_intervals(df, quantile_model, feature_cols, n_weeks=36):
         row = row.fillna(0)
         X_new = row[feature_cols].values.reshape(1, -1)
 
-        # === Model prediction + hybrid blending ===
-        ml_pred = float(quantile_model.predict(X_new)[0])
+        # ====================================================================
+        # GET PREDICTIONS FROM ALL 3 MODELS (for epistemic uncertainty)
+        # ====================================================================
+        pred_rf = quantile_model.models['rf'].predict(X_new)[0]
+        pred_gb = quantile_model.models['gb'].predict(X_new)[0]
+        pred_ridge = quantile_model.models['ridge'].predict(X_new)[0]
+        
+        # Mean prediction across models
+        ml_pred = np.mean([pred_rf, pred_gb, pred_ridge])
+        
+        # Model disagreement (epistemic uncertainty)
+        model_std = np.std([pred_rf, pred_gb, pred_ridge])
+        
+        # Residual uncertainty (aleatoric uncertainty) from training
+        residual_std = quantile_model.residual_std
+        
+        # ====================================================================
+        # HYBRID BLENDING with seasonal component
+        # ====================================================================
         seasonal_pred = seasonal_mean.get(week_num, overall_mean)
 
         if i < 4:
             λ = ml_pred
+            base_std = model_std
             method = "ML"
         elif i < 12:
             w = min((i-4)/8, 1) * 0.3
             λ = ml_pred * (1-w) + seasonal_pred * w
+            # Blend uncertainty too
+            base_std = model_std * (1-w) + overall_std * 0.3 * w
             method = "ML+Season"
         elif i < 24:
             w = 0.3 + (i-12)/12 * 0.4
             λ = ml_pred * (1-w) + seasonal_pred * w
+            base_std = model_std * (1-w) + overall_std * 0.5 * w
             method = "Hybrid"
         else:
             λ = seasonal_pred
+            base_std = overall_std
             method = "Seasonal"
 
         λ = max(λ, 0.01)
-
-        # === Risk level ===
+        
+        # ====================================================================
+        # CALCULATE CONFIDENCE INTERVALS using DUAL UNCERTAINTY
+        # Combines: (1) model disagreement + (2) residual variability
+        # ====================================================================
+        
+        # Total uncertainty grows with forecast horizon
+        horizon_factor = 1 + (i / n_weeks) * 0.5  # 1.0 → 1.5
+        
+        # Combined uncertainty (Document 3 approach)
+        total_std = np.sqrt(residual_std**2 + base_std**2) * horizon_factor
+        
+        # 95% confidence interval (z = 1.96)
+        z_score = 1.96
+        
+        # Calculate bounds
+        lower_ci = λ - z_score * total_std
+        upper_ci = λ + z_score * total_std
+        
+        # Ensure non-negative
+        lower_ci = max(lower_ci, 0)
+        upper_ci = max(upper_ci, λ)
+        
+        # ====================================================================
+        # CALCULATE EXACT POISSON QUANTILES (alternative method)
+        # More accurate for discrete count data
+        # ====================================================================
+        lower_poisson = stats.poisson.ppf(0.025, λ) if λ > 0 else 0
+        upper_poisson = stats.poisson.ppf(0.975, λ) if λ > 0 else 0
+        
+        # Use Poisson for small lambda (< 5), hybrid for larger
+        if λ < 5:
+            lower_bound = lower_poisson
+            upper_bound = upper_poisson
+            ci_method = "Poisson"
+        else:
+            # For larger lambda, use the dual-uncertainty approach
+            lower_bound = max(lower_ci, lower_poisson)  # Conservative choice
+            upper_bound = max(upper_ci, upper_poisson)
+            ci_method = "Hybrid-Uncertainty"
+        
+        # ====================================================================
+        # RISK LEVEL
+        # ====================================================================
         if λ >= 4.0:
             risk = "High"
         elif λ >= 2.5:
@@ -425,7 +493,9 @@ def predict_future_with_intervals(df, quantile_model, feature_cols, n_weeks=36):
         else:
             risk = "Very Low"
 
-        # === FULL POISSON PROBABILITIES (calculated BEFORE using them) ===
+        # ====================================================================
+        # FULL POISSON PROBABILITIES
+        # ====================================================================
         prob_0 = stats.poisson.pmf(0, λ) * 100
         prob_1 = stats.poisson.pmf(1, λ) * 100
         prob_2 = stats.poisson.pmf(2, λ) * 100
@@ -433,18 +503,31 @@ def predict_future_with_intervals(df, quantile_model, feature_cols, n_weeks=36):
         prob_ge4 = (1 - stats.poisson.cdf(3, λ)) * 100
 
         # Most likely number of crashes
-        k_values = np.arange(0, 20)  # safe upper bound
+        k_values = np.arange(0, 20)
         pmfs = stats.poisson.pmf(k_values, λ)
         most_likely_k = int(k_values[np.argmax(pmfs)])
         prob_most_likely = pmfs.max() * 100
 
-        # === Console output ===
-        print(f"{next_week.strftime('%Y-%m-%d')}: λ={λ:.3f} → P({most_likely_k}) = {prob_most_likely:.1f}% | Risk: {risk} [{method}]")
+        # ====================================================================
+        # CONSOLE OUTPUT with uncertainty info
+        # ====================================================================
+        print(f"{next_week.strftime('%Y-%m-%d')}: λ={λ:.2f} | "
+              f"CI=[{lower_bound:.0f}, {upper_bound:.0f}] | "
+              f"Most likely: {most_likely_k} ({prob_most_likely:.1f}%) | "
+              f"Risk: {risk} | σ_total={total_std:.2f} [{method}, {ci_method}]")
 
-        # === Save row ===
+        # ====================================================================
+        # SAVE ROW with all uncertainty metrics
+        # ====================================================================
         predictions.append({
             'week_start': next_week,
             'lambda': round(λ, 3),
+            'predicted_lower': int(lower_bound),
+            'predicted_upper': int(upper_bound),
+            'ci_method': ci_method,
+            'model_uncertainty': round(model_std, 3),
+            'residual_uncertainty': round(residual_std, 3),
+            'total_uncertainty': round(total_std, 3),
             'most_likely_crashes': most_likely_k,
             'probability_%': round(prob_most_likely, 1),
             'risk_level': risk,
@@ -460,7 +543,18 @@ def predict_future_with_intervals(df, quantile_model, feature_cols, n_weeks=36):
         row['total_crashes'] = λ
         extended_df = pd.concat([extended_df, pd.DataFrame([row])], ignore_index=True)
 
-    return pd.DataFrame(predictions)
+    result_df = pd.DataFrame(predictions)
+    
+    print("\n" + "="*70)
+    print("FORECAST SUMMARY WITH UNCERTAINTY QUANTIFICATION")
+    print("="*70)
+    print(f"Average λ: {result_df['lambda'].mean():.2f}")
+    print(f"Average CI width: {(result_df['predicted_upper'] - result_df['predicted_lower']).mean():.1f}")
+    print(f"Average model uncertainty: {result_df['model_uncertainty'].mean():.3f}")
+    print(f"Average total uncertainty: {result_df['total_uncertainty'].mean():.3f}")
+    print("="*70)
+    
+    return result_df
 
 # ============================================================================
 # SEGMENT PROCESSING FUNCTION
@@ -512,7 +606,7 @@ def process_segment(segment_id, filepath):
         
         # Step 8: Future predictions
         future_predictions = predict_future_with_intervals(
-            weekly_df, quantile_model, feature_cols, n_weeks=4
+            weekly_df, quantile_model, feature_cols, n_weeks=12
         )
         
         # Save outputs
@@ -601,7 +695,7 @@ def main():
                         'R2_baseline': r['metrics'].loc[0, 'R²'],
                         'R2_ensemble': r['metrics'].loc[1, 'R²'],
                         'total_historical_weeks': len(r['future_predictions']) + 36,  # just for context
-                        '36w_forecast_total_crashes': r['future_predictions']['predicted_mean'].sum()
+                        '12w_forecast_total_crashes': r['future_predictions']['lambda'].sum()
                     }
                     for r in successful
                 ])
@@ -616,7 +710,7 @@ def main():
                 print("="*60)
                 summary_df['MAE_improvement'] = summary_df['MAE_baseline'] - summary_df['MAE_ensemble']
                 top5 = summary_df.sort_values('MAE_improvement', ascending=False).head(5)
-                print(top5[['segment_id', 'MAE_baseline', 'MAE_ensemble', 'MAE_improvement', '36w_forecast_total_crashes']]
+                print(top5[['segment_id', 'MAE_baseline', 'MAE_ensemble', 'MAE_improvement', '12w_forecast_total_crashes']]
                 .round(2).to_string(index=False))
 
         print("\n" + "="*60)
