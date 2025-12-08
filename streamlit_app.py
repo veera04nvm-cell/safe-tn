@@ -133,6 +133,7 @@ st.markdown("""
 # DATA & ROUTES
 # ============================================================================
 ROUTE_SEGMENTS = {
+    "All":  ["segment_01", "segment_02", "segment_03", "segment_04", "segment_05", "segment_06", "segment_07", "segment_08", "segment_09", "segment_10", "segment_11"],
     "I-40":  ["segment_01", "segment_02", "segment_03"],
     "I-55":  ["segment_04"],
     "I-240": ["segment_05", "segment_06", "segment_07", "segment_08", "segment_09", "segment_10", "segment_11"]
@@ -325,15 +326,18 @@ def create_forecast_plot(future_df):
         hovertemplate='<b>%{x|%b %d, %Y}</b><br>Upper Bound: %{y:.2f}<extra></extra>'
     ))
     
-    # Mean forecast line
+    # Mean forecast line WITH DATA LABELS
     fig.add_trace(go.Scatter(
         x=future_df['week_start'], 
         y=future_df['lambda'],
-        mode='lines+markers', 
+        mode='lines+markers+text',
         name='Mean Forecast (λ)',
         line=dict(color='#ff7f0e', width=3.5),
-        marker=dict(size=10, symbol='diamond'),
-        hovertemplate='<b>%{x|%b %d, %Y}</b><br>Mean: %{y:.2f}<extra></extra>'
+        marker=dict(size=10, symbol='diamond', color='#ff7f0e', line=dict(color='black', width=1)),
+        text=[f"{val:.2f}" for val in future_df['lambda']],
+        textposition='top center',
+        textfont=dict(size=12, color='black', family='Arial Black'),
+        hovertemplate='<b>Week: %{x|%b %d, %Y}</b><br>Mean Forecast: %{y:.2f}<extra></extra>'
     ))
     
     fig.update_layout(
@@ -344,7 +348,7 @@ def create_forecast_plot(future_df):
             'xanchor': 'center'
         },
         xaxis_title={
-            'text': '<b>Date</b>',
+            'text': '<b>Week Start Date</b>',
             'font': {'size': 20, 'family': 'Arial', 'color': 'black'}
         },
         yaxis_title={
@@ -360,7 +364,7 @@ def create_forecast_plot(future_df):
         legend=dict(
             orientation="h", 
             yanchor="top", 
-            y=-0.30, 
+            y=-0.45, 
             xanchor="center", 
             x=0.5,
             font=dict(size=16, family='Arial', color='black')
@@ -370,10 +374,14 @@ def create_forecast_plot(future_df):
             gridwidth=1,
             gridcolor='rgba(200,200,200,0.3)',
             title_font=dict(size=20, family='Arial', color='black'),
-            tickfont=dict(size=16, family='Arial', color='black'),
+            tickfont=dict(size=13, family='Arial Black', color='black'),
             linecolor='black',
             linewidth=2,
-            mirror=True
+            mirror=True,
+            tickmode='array',
+            tickvals=future_df['week_start'],
+            ticktext=[date.strftime('%m-%d-%y') for date in future_df['week_start']],
+            tickangle=-45
         ),
         yaxis=dict(
             showgrid=True,
@@ -385,16 +393,42 @@ def create_forecast_plot(future_df):
             linewidth=2,
             mirror=True
         ),
-        margin=dict(l=80, r=40, t=100, b=110)
+        margin=dict(l=80, r=40, t=100, b=140)
     )
     return fig
 
+def get_most_likely_from_probabilities(row):
+    """
+    Calculate most likely outcome from probability distribution
+    Returns: (most_likely_count, probability_percent)
+    """
+    probs = [
+        row['prob_0_crash'],
+        row['prob_1_crash'],
+        row['prob_2_crash'],
+        row['prob_3_crash'],
+        row['prob_ge4_crash']
+    ]
+    
+    most_likely_idx = probs.index(max(probs))
+    crash_counts = [0, 1, 2, 3, "4+"]
+    
+    return crash_counts[most_likely_idx], probs[most_likely_idx]
+
+
 def create_dual_gauges(row):
-    exp = int(row['most_likely_crashes'])
-    prob = row['probability_%']
+    """Create dual gauges with consistent most likely calculation"""
+    # Use probability distribution to find most likely (CONSISTENT)
+    most_likely_crashes, prob_percent = get_most_likely_from_probabilities(row)
+    
+    # For gauge display, convert "4+" to 4
+    exp = 4 if most_likely_crashes == "4+" else int(most_likely_crashes)
+    prob = prob_percent  # Convert to percentage
+    
     mean = row['lambda']
     level, color = get_risk_level(mean)
     
+    # Gauge 1: Most Likely Outcome
     fig1 = go.Figure(go.Indicator(
         mode="gauge+number", 
         value=exp,
@@ -414,7 +448,11 @@ def create_dual_gauges(row):
                 'value': exp
             }
         },
-        number={'suffix': " crash" if exp == 1 else " crashes", 'font': {'size': 48, 'family': 'Arial', 'color': 'black'}}
+        number={
+            'suffix': " crashes" if most_likely_crashes == "4+" else (" crash" if exp == 1 else " crashes"),
+            'font': {'size': 28, 'family': 'Arial', 'color': 'black'},
+            'prefix': "≥" if most_likely_crashes == "4+" else ""  # Show "≥4 crashes" for 4+
+        }
     ))
     fig1.update_layout(
         height=310, 
@@ -423,6 +461,7 @@ def create_dual_gauges(row):
         plot_bgcolor='white'
     )
     
+    # Gauge 2: Probability of Most Likely
     fig2 = go.Figure(go.Indicator(
         mode="gauge+number", 
         value=prob,
@@ -437,7 +476,7 @@ def create_dual_gauges(row):
                 {'range': [75, 100], 'color': '#a7f3d0'}
             ]
         },
-        number={'suffix': "%", 'font': {'size': 48, 'family': 'Arial', 'color': 'black'}}
+        number={'suffix': "%", 'font': {'size': 28, 'family': 'Arial', 'color': 'black'}}
     ))
     fig2.update_layout(
         height=310, 
@@ -448,7 +487,9 @@ def create_dual_gauges(row):
     
     return fig1, fig2, level, color
 
+
 def create_probability_pie_chart(row):
+    """Create probability pie chart with consistent most likely calculation"""
     probs = [
         row['prob_0_crash'],
         row['prob_1_crash'],
@@ -456,13 +497,16 @@ def create_probability_pie_chart(row):
         row['prob_3_crash'],
         row['prob_ge4_crash']
     ]
+    
     labels = ["0 Crashes", "1 Crash", "2 Crashes", "3 Crashes", "4+ Crashes"]
-    most_likely_idx = probs.index(max(probs))
-    most_likely_count = [0,1,2,3,"4+"][most_likely_idx]
-
+    
+    # Use consistent calculation
+    most_likely_crashes, prob_percent = get_most_likely_from_probabilities(row)
+    most_likely_idx = probs.index(prob_percent)
+    
     fig = go.Figure(data=[go.Pie(
         labels=labels,
-        values=probs,
+        values=[p * 100 for p in probs],  # Convert to percentages
         hole=0.4,
         marker=dict(
             colors=['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#991b1b'],
@@ -471,13 +515,16 @@ def create_probability_pie_chart(row):
         textinfo='label+percent',
         textposition='auto',
         textfont=dict(size=16, family='Arial', color='black'),
-        hovertemplate='<b>%{label}</b><br>Probability: %{percent}<extra></extra>',
+        hovertemplate='<b>%{label}</b><br>Probability: %{value:.1f}%<extra></extra>',
         pull=[0.1 if i == most_likely_idx else 0 for i in range(5)],
         sort=False
     )])
 
+    # Center annotation with consistent values
+    crash_label = f"{most_likely_crashes} Crash" if most_likely_crashes == 1 else f"{most_likely_crashes} Crashes"
+    
     fig.add_annotation(
-        text=f"<b>Most Likely:</b><br>{most_likely_count} Crash{'es' if most_likely_count != 1 else ''}<br><b>{max(probs):.1f}%</b>",
+        text=f"<b>Most Likely:</b><br>{crash_label}<br><b>{prob_percent:.1f}%</b>",
         x=0.5, y=0.5,
         font=dict(size=20, color="white", family="Arial"),
         showarrow=False,
@@ -511,6 +558,232 @@ def create_probability_pie_chart(row):
         margin=dict(l=20, r=140, t=80, b=20)
     )
     
+    return fig
+
+def create_monthly_crashes_plot(df, selected_year=None, selected_route=None, selected_segment=None):
+    """Create monthly crash variation with Cleveland dot plot - dot size varies by crash count"""
+    filtered_df = df.copy()
+    if selected_year and selected_year != "All Years":
+        filtered_df = filtered_df[filtered_df['Year Of Crash'] == int(selected_year)]
+    if selected_route and selected_route != "All Routes":
+        filtered_df = filtered_df[filtered_df['Route'] == selected_route]
+    if selected_segment and selected_segment != "All Segments":
+        filtered_df = filtered_df[filtered_df['Segment ID'] == selected_segment]
+    
+    # Convert date and extract month
+    filtered_df['Crash Date'] = pd.to_datetime(filtered_df['Date of Crash'], errors='coerce')
+    filtered_df = filtered_df.dropna(subset=['Crash Date'])
+    filtered_df['Month_Num'] = filtered_df['Crash Date'].dt.month
+    
+    # Group by month number
+    monthly_crashes = filtered_df.groupby('Month_Num').size().reset_index(name='Crashes')
+    
+    # Create all 12 months even if some have 0 crashes
+    all_months = pd.DataFrame({'Month_Num': range(1, 13)})
+    monthly_crashes = all_months.merge(monthly_crashes, on='Month_Num', how='left').fillna(0)
+    
+    # Month names
+    month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    monthly_crashes['Month_Name'] = monthly_crashes['Month_Num'].apply(lambda x: month_names[x-1])
+    
+    # Normalize dot sizes (scale between 20 and 80 for better visibility)
+    max_crashes = monthly_crashes['Crashes'].max()
+    if max_crashes > 0:
+        monthly_crashes['Dot_Size'] = 20 + (monthly_crashes['Crashes'] / max_crashes) * 60
+    else:
+        monthly_crashes['Dot_Size'] = 20
+    
+    # Create color scale based on crash count
+    monthly_crashes['Color'] = monthly_crashes['Crashes'].apply(
+        lambda x: '#034fa0' if x > max_crashes * 0.75 else
+                  '#0078d4' if x > max_crashes * 0.5 else
+                  '#249ee4' if x > max_crashes * 0.25 else
+                  '#54daff'
+    )
+    
+    fig = go.Figure()
+    
+    # Add scatter plot with varying dot sizes
+    fig.add_trace(go.Scatter(
+        x=monthly_crashes['Month_Name'],
+        y=monthly_crashes['Crashes'],
+        mode='markers+text',
+        marker=dict(
+            size=monthly_crashes['Dot_Size'],
+            color=monthly_crashes['Color'],
+            line=dict(color='black', width=0.15),
+            opacity=0.8
+        ),
+        text=[f"<b>{int(count)}</b>" for count in monthly_crashes['Crashes']],
+        textposition='middle center',
+        textfont=dict(size=14, color='white', family='Arial Black'),
+        hovertemplate='<b>%{x}</b><br>Total Crashes: %{y}<extra></extra>',
+        name='Crashes'
+    ))
+    
+    # Add baseline at y=0
+    fig.add_shape(
+        type="line",
+        x0=-0.5, x1=11.5,
+        y0=0, y1=0,
+        line=dict(color="black", width=2)
+    )
+    
+    fig.update_layout(
+        title={
+            'text': '<b>Monthly Crash Variation</b>',
+            'font': {'size': 24, 'family': 'Arial', 'color': '#1f77b4'},
+            'x': 0.5,
+            'xanchor': 'center'
+        },
+        xaxis_title={'text': '<b>Month</b>', 'font': {'size': 20, 'family': 'Arial', 'color': 'black'}},
+        yaxis_title={'text': '<b>Total Crashes</b>', 'font': {'size': 20, 'family': 'Arial', 'color': 'black'}},
+        height=650,
+        template='plotly_white',
+        paper_bgcolor='white',
+        plot_bgcolor='white',
+        showlegend=False,
+        xaxis=dict(
+            showgrid=False,
+            tickfont=dict(size=16, family='Arial Black', color='black'),
+            linecolor='black',
+            linewidth=2,
+            mirror=True
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='rgba(200,200,200,0.3)',
+            tickfont=dict(size=16, family='Arial', color='black'),
+            linecolor='black',
+            linewidth=2,
+            mirror=True,
+            zeroline=True,
+            zerolinewidth=2,
+            zerolinecolor='black'
+        ),
+        margin=dict(l=80, r=40, t=100, b=80),
+        # annotations=[
+        #     dict(
+        #         text="<i>Dot size represents crash count magnitude</i>",
+        #         xref="paper", yref="paper",
+        #         x=0.5, y=-0.15,
+        #         showarrow=False,
+        #         font=dict(size=14, color="gray", family="Arial")
+        #     )
+        # ]
+    )
+    
+    return fig
+
+def create_day_night_crashes_plot(df, selected_year=None, selected_route=None):
+    """Create day vs night crash variations across segments"""
+    filtered_df = df.copy()
+    if selected_year and selected_year != "All Years":
+        filtered_df = filtered_df[filtered_df['Year Of Crash'] == int(selected_year)]
+    if selected_route and selected_route != "All Routes":
+        filtered_df = filtered_df[filtered_df['Route'] == selected_route]
+    
+    # Clean up light condition column name (handle potential variations)
+    light_col = None
+    for col in filtered_df.columns:
+        if 'light' in col.lower():
+            light_col = col
+            break
+    
+    if light_col is None:
+        # If no light condition column, create empty figure with message
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Light Condition data not available",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False,
+            font=dict(size=20, color="red")
+        )
+        return fig
+    
+    # Group by segment and light condition
+    day_night_data = filtered_df.groupby(['Segment ID', light_col]).size().reset_index(name='Crashes')
+    
+    # Pivot to get day and night as separate columns
+    pivot_data = day_night_data.pivot(index='Segment ID', columns=light_col, values='Crashes').fillna(0)
+    
+    # Get day and night columns (adjust column names based on your data)
+    daylight_cols = [col for col in pivot_data.columns if any(term in str(col).lower() for term in ['day', 'light', 'dawn', 'dusk'])]
+    dark_cols = [col for col in pivot_data.columns if any(term in str(col).lower() for term in ['dark', 'night'])]
+    
+    day_crashes = pivot_data[daylight_cols].sum(axis=1) if daylight_cols else pd.Series(0, index=pivot_data.index)
+    night_crashes = pivot_data[dark_cols].sum(axis=1) if dark_cols else pd.Series(0, index=pivot_data.index)
+    
+    segments = [str(seg) for seg in pivot_data.index.tolist()]  # FIXED: Convert to strings
+    
+    fig = go.Figure()
+    
+    # Day crashes
+    fig.add_trace(go.Bar(
+        x=segments,
+        y=day_crashes,
+        name='Daytime',
+        marker=dict(color='#ffa500', line=dict(color='black', width=1.5)),
+        text=[f"{int(v)}" for v in day_crashes],
+        textposition='outside',
+        textfont=dict(size=14, color='black', family='Arial Black'),
+        hovertemplate='<b>%{x}</b><br>Daytime Crashes: %{y}<extra></extra>'
+    ))
+    
+    # Night crashes
+    fig.add_trace(go.Bar(
+        x=segments,
+        y=night_crashes,
+        name='Nighttime',
+        marker=dict(color='#191970', line=dict(color='black', width=1.5)),
+        text=[f"{int(v)}" for v in night_crashes],
+        textposition='outside',
+        textfont=dict(size=14, color='black', family='Arial Black'),
+        hovertemplate='<b>%{x}</b><br>Nighttime Crashes: %{y}<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title={
+            'text': '<b>Day vs Night Crash Variations Across Segments</b>',
+            'font': {'size': 24, 'family': 'Arial', 'color': '#1f77b4'},
+            'x': 0.5,
+            'xanchor': 'center'
+        },
+        xaxis_title={'text': '<b>Segment ID</b>', 'font': {'size': 20, 'family': 'Arial', 'color': 'black'}},
+        yaxis_title={'text': '<b>Number of Crashes</b>', 'font': {'size': 20, 'family': 'Arial', 'color': 'black'}},
+        height=650,
+        template='plotly_white',
+        paper_bgcolor='white',
+        plot_bgcolor='white',
+        barmode='group',
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.25,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=16, family='Arial', color='black')
+        ),
+        xaxis=dict(
+            showgrid=False,
+            tickfont=dict(size=16, family='Arial Black', color='black'),
+            linecolor='black',
+            linewidth=2,
+            mirror=True
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='rgba(200,200,200,0.3)',
+            tickfont=dict(size=16, family='Arial', color='black'),
+            linecolor='black',
+            linewidth=2,
+            mirror=True
+        ),
+        margin=dict(l=80, r=40, t=100, b=110)
+    )
     return fig
 
 def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
@@ -572,7 +845,7 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
             'text': '<b>Number of Crashes</b>',
             'font': {'size': 19, 'family': 'Arial', 'color': 'black'}
         },
-        height=550,
+        height=650,
         template='plotly_white',
         showlegend=False,
         paper_bgcolor='white',
@@ -650,7 +923,7 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
             'text': '<b>Number of Hit and Run Cases</b>',
             'font': {'size': 19, 'family': 'Arial', 'color': 'black'}
         },
-        height=550,
+        height=650,
         template='plotly_white',
         showlegend=False,
         paper_bgcolor='white',
@@ -697,19 +970,45 @@ def show_forecast_page():
     
     if segmented_df is not None:
         st.markdown("---")
-        st.subheader("🔅 Background: Segment Crash Analysis")
-        st.markdown("*Historical crash data analysis across interstate segments*")
+        st.subheader("🔅 Background: Crash Data Analysis")
+        st.markdown("*Historical crash patterns and trends across interstate segments*")
         
         # Filters for background plots
-        col_filter1, col_filter2 = st.columns(2)
+        col_filter1, col_filter2, col_filter3 = st.columns(3)
         with col_filter1:
             years = ["All Years"] + sorted(segmented_df['Year Of Crash'].unique().tolist(), reverse=True)
             selected_year = st.selectbox("Filter by Year", years, key="bg_year")
         with col_filter2:
             routes = ["All Routes"] + sorted(segmented_df['Route'].unique().tolist())
             selected_route = st.selectbox("Filter by Route", routes, key="bg_route")
+        with col_filter3:
+            # Segment filter for monthly crashes plot only
+            segments = ["All Segments"] + sorted(segmented_df['Segment ID'].unique().tolist())
+            selected_segment = st.selectbox("Filter by Segment", segments, key="bg_segment", 
+                                        help="This filter applies only to the Monthly Crashes Heatmap")
         
+        # Monthly crashes heatmap (with segment filter)
+        st.markdown("#### 🔅 Monthly Crash Trends")
+        st.markdown("""
+        <div style="border: 1px solid #1f77b4; border-radius: 10px; padding: 15px; background-color: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+        """, unsafe_allow_html=True)
+        fig_monthly = create_monthly_crashes_plot(segmented_df, selected_year, selected_route, selected_segment)
+        st.plotly_chart(fig_monthly, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Day vs Night crashes plot (no segment filter - uses only year and route)
+        st.markdown("#### 🔅 Day vs Night Crash Comparison")
+        st.markdown("""
+        <div style="border: 1px solid #1f77b4; border-radius: 10px; padding: 15px; background-color: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+        """, unsafe_allow_html=True)
+        fig_daynight = create_day_night_crashes_plot(segmented_df, selected_year, selected_route)
+        st.plotly_chart(fig_daynight, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+            
         # Create and display ranking plots
+        st.markdown("#### 🔅 Top 10 Segment Rankings")
         fig_crash, fig_hitrun = create_segment_ranking_plots(segmented_df, selected_year, selected_route)
         
         col_plot1, col_plot2 = st.columns(2)
@@ -737,8 +1036,6 @@ def show_forecast_page():
         """, unsafe_allow_html=True)
         
         st.markdown("---")
-    
-    # st.markdown("### 🎯 Probabilistic Forecast")
 
     # Route & Segment selector
     col1, col2 = st.columns([1,2])
