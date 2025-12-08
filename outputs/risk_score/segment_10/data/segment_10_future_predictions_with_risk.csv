@@ -1,0 +1,13 @@
+week_start,lambda,predicted_lower,predicted_upper,ci_method,model_uncertainty,residual_uncertainty,total_uncertainty,most_likely_crashes,probability_%,risk_level,method,prob_0_crash,prob_1_crash,prob_2_crash,prob_3_crash,prob_ge4_crash
+2025-01-13,3.357,0,7,Poisson,0.445,0.1,0.456,3,22.0,Medium,ML,3.5,11.7,19.6,22.0,43.2
+2025-01-20,2.836,0,7,Poisson,0.278,0.1,0.307,2,23.6,Medium,ML,5.9,16.6,23.6,22.3,31.6
+2025-01-27,3.111,0,7,Poisson,0.419,0.1,0.466,3,22.4,Medium,ML,4.5,13.9,21.6,22.4,37.8
+2025-02-03,2.901,0,7,Poisson,0.163,0.1,0.215,2,23.1,Medium,ML,5.5,15.9,23.1,22.4,33.1
+2025-02-10,3.029,0,7,Poisson,0.315,0.1,0.385,3,22.4,Medium,ML+Season,4.8,14.6,22.2,22.4,35.9
+2025-02-17,3.076,0,7,Poisson,0.295,0.1,0.403,3,22.4,Medium,ML+Season,4.6,14.2,21.8,22.4,37.0
+2025-02-24,3.309,0,7,Poisson,0.339,0.1,0.493,3,22.1,Medium,ML+Season,3.7,12.1,20.0,22.1,42.2
+2025-03-03,3.955,1,8,Poisson,0.398,0.1,0.601,3,19.8,Medium,ML+Season,1.9,7.6,15.0,19.8,55.8
+2025-03-10,4.013,1,8,Poisson,0.429,0.1,0.679,4,19.5,High,ML+Season,1.8,7.3,14.6,19.5,56.9
+2025-03-17,4.249,1,9,Poisson,0.457,0.1,0.755,4,19.4,High,ML+Season,1.4,6.1,12.9,18.3,61.4
+2025-03-24,4.77,1,9,Poisson,0.543,0.1,0.894,4,18.3,High,ML+Season,0.8,4.0,9.6,15.3,70.1
+2025-03-31,5.728,4,11,Hybrid-Uncertainty,0.293,0.1,0.675,5,16.7,High,ML+Season,0.3,1.9,5.3,10.2,82.3
