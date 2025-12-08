@@ -1,5 +1,0 @@
-week_start,lambda,most_likely_crashes,probability_%,risk_level,method,prob_0_crash,prob_1_crash,prob_2_crash,prob_3_crash,prob_ge4_crash
-2025-01-13,0.998,0,36.9,Very Low,ML,36.9,36.8,18.4,6.1,1.9
-2025-01-20,0.585,0,55.7,Very Low,ML,55.7,32.6,9.5,1.9,0.3
-2025-01-27,1.084,1,36.7,Low,ML,33.8,36.7,19.9,7.2,2.5
-2025-02-03,0.96,0,38.3,Very Low,ML,38.3,36.8,17.6,5.6,1.7
