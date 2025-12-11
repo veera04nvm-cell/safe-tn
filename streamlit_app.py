@@ -7,16 +7,7 @@ warnings.filterwarnings('ignore')
 import hashlib
 import base64
 import os
-
-import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import warnings
-warnings.filterwarnings('ignore')
-import hashlib
-import base64
-import os
+import numpy as np
 
 # ============================================================================
 # SEGMENT DEFINITIONS & ROUTE MAPPING
@@ -293,9 +284,7 @@ def get_risk_level(val):
 # PLOTS
 # ============================================================================
 def create_historical_plot(historical_df):
-    """Create a clean historical weekly crashes plot with large fonts and borders."""
-    import numpy as np
-    
+    """Create a clean historical weekly crashes plot with thousand separators."""
     fig = go.Figure()
     
     if not historical_df.empty:
@@ -311,7 +300,7 @@ def create_historical_plot(historical_df):
             mode='lines', 
             name='Weekly Crashes',
             line=dict(color='#1f77b4', width=2.5),
-            hovertemplate='<b>%{x|%b %d, %Y}</b><br>Crashes: %{y:.0f}<extra></extra>'
+            hovertemplate='<b>%{x|%b %d, %Y}</b><br>Crashes: %{y:,.0f}<extra></extra>'  # Added comma
         ))
         
         # Add moving average trend line
@@ -321,7 +310,7 @@ def create_historical_plot(historical_df):
             mode='lines', 
             name='4-Week Moving Avg',
             line=dict(color='red', width=2, dash='dot'),
-            hovertemplate='<b>%{x|%b %d, %Y}</b><br>Avg: %{y:.1f}<extra></extra>'
+            hovertemplate='<b>%{x|%b %d, %Y}</b><br>Avg: %{y:,.1f}<extra></extra>'  # Added comma
         ))
     
     fig.update_layout(
@@ -371,16 +360,15 @@ def create_historical_plot(historical_df):
             tickfont=dict(size=16, family='Arial', color='black'),
             linecolor='black',
             linewidth=2,
-            mirror=True
+            mirror=True,
+            separatethousands=True  # ADD THIS
         ),
         margin=dict(l=80, r=40, t=100, b=110)
     )
     return fig
 
 def create_forecast_plot(future_df):
-    """Create prediction plot with upper, lower, mean - large fonts and borders."""
-    import numpy as np
-    
+    """Create forecast plot with thousand separators."""
     fig = go.Figure()
     
     # Calculate confidence bounds
@@ -388,14 +376,14 @@ def create_forecast_plot(future_df):
     upper = future_df['lambda'] + se
     lower = (future_df['lambda'] - se).clip(0)
     
-    # Lower bound line (add first for proper fill)
+    # Lower bound line
     fig.add_trace(go.Scatter(
         x=future_df['week_start'], 
         y=lower,
         mode='lines', 
         name='Lower Bound (95%)',
         line=dict(color='#28a745', width=2.5, dash='dash'),
-        hovertemplate='<b>%{x|%b %d, %Y}</b><br>Lower Bound: %{y:.2f}<extra></extra>'
+        hovertemplate='<b>%{x|%b %d, %Y}</b><br>Lower Bound: %{y:,.2f}<extra></extra>'  # Added comma
     ))
     
     # Upper bound line
@@ -407,26 +395,26 @@ def create_forecast_plot(future_df):
         line=dict(color='#dc3545', width=2.5, dash='dash'),
         fill='tonexty', 
         fillcolor='rgba(255,127,14,0.15)',
-        hovertemplate='<b>%{x|%b %d, %Y}</b><br>Upper Bound: %{y:.2f}<extra></extra>'
+        hovertemplate='<b>%{x|%b %d, %Y}</b><br>Upper Bound: %{y:,.2f}<extra></extra>'  # Added comma
     ))
     
-    # Mean prediction line WITH DATA LABELS
+    # Mean forecast line WITH DATA LABELS
     fig.add_trace(go.Scatter(
         x=future_df['week_start'], 
         y=future_df['lambda'],
         mode='lines+markers+text',
-        name='Mean Prediction (λ)',
+        name='Mean Forecast (λ)',
         line=dict(color='#ff7f0e', width=3.5),
         marker=dict(size=10, symbol='diamond', color='#ff7f0e', line=dict(color='black', width=1)),
-        text=[f"{val:.2f}" for val in future_df['lambda']],
+        text=[f"{val:,.2f}" for val in future_df['lambda']],  # Added comma formatting
         textposition='top center',
         textfont=dict(size=12, color='black', family='Arial Black'),
-        hovertemplate='<b>Week: %{x|%b %d, %Y}</b><br>Mean Prediction: %{y:.2f}<extra></extra>'
+        hovertemplate='<b>Week: %{x|%b %d, %Y}</b><br>Mean Forecast: %{y:,.2f}<extra></extra>'  # Added comma
     ))
     
     fig.update_layout(
         title={
-            'text': '<b>Probabilistic Crash Prediction</b>',
+            'text': '<b>Probabilistic Crash Forecast</b>',
             'font': {'size': 24, 'family': 'Arial', 'color': '#1f77b4'},
             'x': 0.5,
             'xanchor': 'center'
@@ -475,7 +463,8 @@ def create_forecast_plot(future_df):
             tickfont=dict(size=16, family='Arial', color='black'),
             linecolor='black',
             linewidth=2,
-            mirror=True
+            mirror=True,
+            separatethousands=True  # ADD THIS
         ),
         margin=dict(l=80, r=40, t=100, b=140)
     )
@@ -645,7 +634,7 @@ def create_probability_pie_chart(row):
     return fig
 
 def create_monthly_crashes_plot(df, selected_year=None, selected_route=None, selected_segment=None):
-    """Create monthly crash variation with Cleveland dot plot - dot size varies by crash count"""
+    """Create monthly crash variation with thousand separators."""
     filtered_df = df.copy()
     if selected_year and selected_year != "All Years":
         filtered_df = filtered_df[filtered_df['Year Of Crash'] == int(selected_year)]
@@ -671,7 +660,7 @@ def create_monthly_crashes_plot(df, selected_year=None, selected_route=None, sel
                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
     monthly_crashes['Month_Name'] = monthly_crashes['Month_Num'].apply(lambda x: month_names[x-1])
     
-    # Normalize dot sizes (scale between 20 and 80 for better visibility)
+    # Normalize dot sizes
     max_crashes = monthly_crashes['Crashes'].max()
     if max_crashes > 0:
         monthly_crashes['Dot_Size'] = 20 + (monthly_crashes['Crashes'] / max_crashes) * 60
@@ -699,10 +688,10 @@ def create_monthly_crashes_plot(df, selected_year=None, selected_route=None, sel
             line=dict(color='black', width=0.15),
             opacity=0.8
         ),
-        text=[f"<b>{int(count)}</b>" for count in monthly_crashes['Crashes']],
+        text=[f"<b>{int(count):,}</b>" for count in monthly_crashes['Crashes']],  # Added comma formatting
         textposition='middle center',
         textfont=dict(size=14, color='white', family='Arial Black'),
-        hovertemplate='<b>%{x}</b><br>Total Crashes: %{y}<extra></extra>',
+        hovertemplate='<b>%{x}</b><br>Total Crashes: %{y:,.0f}<extra></extra>',  # Added comma
         name='Crashes'
     ))
     
@@ -745,31 +734,23 @@ def create_monthly_crashes_plot(df, selected_year=None, selected_route=None, sel
             mirror=True,
             zeroline=True,
             zerolinewidth=2,
-            zerolinecolor='black'
+            zerolinecolor='black',
+            separatethousands=True  # ADD THIS
         ),
-        margin=dict(l=80, r=40, t=100, b=80),
-        # annotations=[
-        #     dict(
-        #         text="<i>Dot size represents crash count magnitude</i>",
-        #         xref="paper", yref="paper",
-        #         x=0.5, y=-0.15,
-        #         showarrow=False,
-        #         font=dict(size=14, color="gray", family="Arial")
-        #     )
-        # ]
+        margin=dict(l=80, r=40, t=100, b=80)
     )
     
     return fig
 
 def create_day_night_crashes_plot(df, selected_year=None, selected_route=None):
-    """Create day vs night crash variations across segments"""
+    """Create day vs night crash variations with thousand separators."""
     filtered_df = df.copy()
     if selected_year and selected_year != "All Years":
         filtered_df = filtered_df[filtered_df['Year Of Crash'] == int(selected_year)]
     if selected_route and selected_route != "All Routes":
         filtered_df = filtered_df[filtered_df['Route'] == selected_route]
     
-    # Clean up light condition column name (handle potential variations)
+    # Clean up light condition column name
     light_col = None
     for col in filtered_df.columns:
         if 'light' in col.lower():
@@ -777,7 +758,6 @@ def create_day_night_crashes_plot(df, selected_year=None, selected_route=None):
             break
     
     if light_col is None:
-        # If no light condition column, create empty figure with message
         fig = go.Figure()
         fig.add_annotation(
             text="Light Condition data not available",
@@ -793,14 +773,14 @@ def create_day_night_crashes_plot(df, selected_year=None, selected_route=None):
     # Pivot to get day and night as separate columns
     pivot_data = day_night_data.pivot(index='Segment ID', columns=light_col, values='Crashes').fillna(0)
     
-    # Get day and night columns (adjust column names based on your data)
+    # Get day and night columns
     daylight_cols = [col for col in pivot_data.columns if any(term in str(col).lower() for term in ['day', 'light', 'dawn', 'dusk'])]
     dark_cols = [col for col in pivot_data.columns if any(term in str(col).lower() for term in ['dark', 'night'])]
     
     day_crashes = pivot_data[daylight_cols].sum(axis=1) if daylight_cols else pd.Series(0, index=pivot_data.index)
     night_crashes = pivot_data[dark_cols].sum(axis=1) if dark_cols else pd.Series(0, index=pivot_data.index)
     
-    segments = [str(seg) for seg in pivot_data.index.tolist()]  # FIXED: Convert to strings
+    segments = [str(seg) for seg in pivot_data.index.tolist()]
     
     fig = go.Figure()
     
@@ -810,10 +790,10 @@ def create_day_night_crashes_plot(df, selected_year=None, selected_route=None):
         y=day_crashes,
         name='Daytime',
         marker=dict(color='#ffa500', line=dict(color='black', width=1.5)),
-        text=[f"{int(v)}" for v in day_crashes],
+        text=[f"{int(v):,}" for v in day_crashes],  # Added comma formatting
         textposition='outside',
         textfont=dict(size=14, color='black', family='Arial Black'),
-        hovertemplate='<b>%{x}</b><br>Daytime Crashes: %{y}<extra></extra>'
+        hovertemplate='<b>%{x}</b><br>Daytime Crashes: %{y:,.0f}<extra></extra>'  # Added comma
     ))
     
     # Night crashes
@@ -822,10 +802,10 @@ def create_day_night_crashes_plot(df, selected_year=None, selected_route=None):
         y=night_crashes,
         name='Nighttime',
         marker=dict(color='#191970', line=dict(color='black', width=1.5)),
-        text=[f"{int(v)}" for v in night_crashes],
+        text=[f"{int(v):,}" for v in night_crashes],  # Added comma formatting
         textposition='outside',
         textfont=dict(size=14, color='black', family='Arial Black'),
-        hovertemplate='<b>%{x}</b><br>Nighttime Crashes: %{y}<extra></extra>'
+        hovertemplate='<b>%{x}</b><br>Nighttime Crashes: %{y:,.0f}<extra></extra>'  # Added comma
     ))
     
     fig.update_layout(
@@ -864,14 +844,15 @@ def create_day_night_crashes_plot(df, selected_year=None, selected_route=None):
             tickfont=dict(size=16, family='Arial', color='black'),
             linecolor='black',
             linewidth=2,
-            mirror=True
+            mirror=True,
+            separatethousands=True  # ADD THIS
         ),
         margin=dict(l=80, r=40, t=100, b=110)
     )
     return fig
 
 def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
-    """Create two 1D ranking plots - true 1D visualization with fixed-width bars in descending order"""
+    """Create two ranking plots with thousand separators."""
     
     # Filter data based on selections
     filtered_df = df.copy()
@@ -882,20 +863,19 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
     
     # Define colors for each route
     route_colors = {
-        'I0040': '#1f77b4',   # Blue
-        'I0055': '#a41020',   # Maroon
-        'I0240': '#21A366'    # Green
+        'I0040': '#1f77b4',
+        'I0055': '#a41020',
+        'I0240': '#21A366'
     }
     
-    # ========== PLOT 1: Top 10 Segments by Total Crashes (1D) ==========
+    # ========== PLOT 1: Top 10 Segments by Total Crashes ==========
     crash_counts = filtered_df.groupby(['Segment ID', 'Route']).size().reset_index(name='Total Crashes')
-    crash_counts = crash_counts.sort_values('Total Crashes', ascending=False).head(10)  # Descending order
+    crash_counts = crash_counts.sort_values('Total Crashes', ascending=False).head(10)
     crash_counts['Rank'] = range(1, len(crash_counts) + 1)
     crash_counts['Color'] = crash_counts['Route'].map(route_colors)
     
     fig1 = go.Figure()
     
-    # Create vertical bars with FIXED width
     fig1.add_trace(go.Bar(
         x=crash_counts['Rank'],
         y=crash_counts['Total Crashes'],
@@ -903,12 +883,12 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
             color=crash_counts['Color'],
             line=dict(color='black', width=2)
         ),
-        width=0.6,  # Fixed width for all bars
-        text=[f"<b>{seg}</b><br>{count} crashes" 
+        width=0.6,
+        text=[f"<b>{seg}</b><br>{count:,} crashes"  # Added comma formatting
               for seg, count in zip(crash_counts['Segment ID'], crash_counts['Total Crashes'])],
         textposition='outside',
         textfont=dict(size=14, color='black', family='Arial Black'),
-        hovertemplate='<b>Rank: %{x}</b><br>Segment: %{customdata[0]}<br>Route: %{customdata[1]}<br>Total Crashes: %{y}<extra></extra>',
+        hovertemplate='<b>Rank: %{x}</b><br>Segment: %{customdata[0]}<br>Route: %{customdata[1]}<br>Total Crashes: %{y:,.0f}<extra></extra>',  # Added comma
         customdata=crash_counts[['Segment ID', 'Route']].values
     ))
     
@@ -944,7 +924,7 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
             tickmode='linear',
             tick0=1,
             dtick=1,
-            range=[0.5, 10.5]  # Fixed range to prevent bar width changes
+            range=[0.5, 10.5]
         ),
         yaxis=dict(
             showgrid=True,
@@ -957,23 +937,23 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
             mirror=True,
             zeroline=True,
             zerolinewidth=2,
-            zerolinecolor='black'
+            zerolinecolor='black',
+            separatethousands=True  # ADD THIS
         ),
         margin=dict(l=80, r=40, t=90, b=80),
         bargap=0.05,
         bargroupgap=0
     )
     
-    # ========== PLOT 2: Top 10 Segments by Hit and Run Cases (1D) ==========
+    # ========== PLOT 2: Top 10 Segments by Hit and Run Cases ==========
     hit_run_df = filtered_df[filtered_df['Hit and Run'] == 'Yes'].copy()
     hit_run_counts = hit_run_df.groupby(['Segment ID', 'Route']).size().reset_index(name='Hit and Run Cases')
-    hit_run_counts = hit_run_counts.sort_values('Hit and Run Cases', ascending=False).head(10)  # Descending order
+    hit_run_counts = hit_run_counts.sort_values('Hit and Run Cases', ascending=False).head(10)
     hit_run_counts['Rank'] = range(1, len(hit_run_counts) + 1)
     hit_run_counts['Color'] = hit_run_counts['Route'].map(route_colors)
     
     fig2 = go.Figure()
     
-    # Create vertical bars with FIXED width
     fig2.add_trace(go.Bar(
         x=hit_run_counts['Rank'],
         y=hit_run_counts['Hit and Run Cases'],
@@ -981,12 +961,12 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
             color=hit_run_counts['Color'],
             line=dict(color='black', width=2)
         ),
-        width=0.6,  # Fixed width for all bars
-        text=[f"<b>{seg}</b><br>{count} cases" 
+        width=0.6,
+        text=[f"<b>{seg}</b><br>{count:,} cases"  # Added comma formatting
               for seg, count in zip(hit_run_counts['Segment ID'], hit_run_counts['Hit and Run Cases'])],
         textposition='outside',
         textfont=dict(size=14, color='black', family='Arial Black'),
-        hovertemplate='<b>Rank: %{x}</b><br>Segment: %{customdata[0]}<br>Route: %{customdata[1]}<br>Hit & Run Cases: %{y}<extra></extra>',
+        hovertemplate='<b>Rank: %{x}</b><br>Segment: %{customdata[0]}<br>Route: %{customdata[1]}<br>Hit & Run Cases: %{y:,.0f}<extra></extra>',  # Added comma
         customdata=hit_run_counts[['Segment ID', 'Route']].values
     ))
     
@@ -1022,7 +1002,7 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
             tickmode='linear',
             tick0=1,
             dtick=1,
-            range=[0.5, 10.5]  # Fixed range to prevent bar width changes
+            range=[0.5, 10.5]
         ),
         yaxis=dict(
             showgrid=True,
@@ -1035,7 +1015,8 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
             mirror=True,
             zeroline=True,
             zerolinewidth=2,
-            zerolinecolor='black'
+            zerolinecolor='black',
+            separatethousands=True  # ADD THIS
         ),
         margin=dict(l=80, r=40, t=90, b=80),
         bargap=0.05,
