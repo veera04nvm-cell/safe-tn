@@ -8,6 +8,90 @@ import hashlib
 import base64
 import os
 
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
+import hashlib
+import base64
+import os
+
+# ============================================================================
+# SEGMENT DEFINITIONS & ROUTE MAPPING
+# ============================================================================
+
+# Import segment definitions from model
+SEGMENTS = {
+    'segment_01': 'I0040_Seg26',
+    'segment_02': 'I0040_Seg27',
+    'segment_03': 'I0040_Seg28',
+    'segment_04': 'I55_Seg05',
+    'segment_05': 'I240_Seg02',
+    'segment_06': 'I240_Seg03',
+    'segment_07': 'I240_Seg05',
+    'segment_08': 'I240_Seg08',
+    'segment_09': 'I240_Seg11',
+    'segment_10': 'I240_Seg12',
+    'segment_11': 'I240_Seg13',
+}
+
+def get_segment_display_name(segment_id):
+    """Convert segment_01 to readable format like 'I-40 Seg26'"""
+    if segment_id in SEGMENTS:
+        route_seg = SEGMENTS[segment_id]  # e.g., 'I0040_Seg26'
+        parts = route_seg.split('_')
+        route = parts[0]  # 'I0040'
+        seg = parts[1]    # 'Seg26'
+        
+        # Format route name
+        if route == "I0040":
+            route_name = "I-40"
+        elif route == "I55":
+            route_name = "I-55"
+        elif route == "I240":
+            route_name = "I-240"
+        else:
+            route_name = route
+        
+        return f"{route_name} {seg}"
+    return segment_id
+
+def create_route_segment_mapping():
+    """Parse SEGMENTS dictionary to create route-based grouping"""
+    mapping = {"All": list(SEGMENTS.keys())}
+    
+    for seg_id, route_seg in SEGMENTS.items():
+        # Parse "I0040_Seg26" → route="I-40"
+        route = route_seg.split('_')[0]
+        
+        # Format: I0040 → I-40, I55 → I-55, I240 → I-240
+        if route == "I0040":
+            route_name = "I-40"
+        elif route == "I55":
+            route_name = "I-55"
+        elif route == "I240":
+            route_name = "I-240"
+        else:
+            route_name = route
+        
+        if route_name not in mapping:
+            mapping[route_name] = []
+        mapping[route_name].append(seg_id)
+    
+    return mapping
+
+ROUTE_SEGMENTS = create_route_segment_mapping()
+
+# # Debug print (remove in production)
+# print("=" * 60)
+# print("ROUTE SEGMENTS MAPPING:")
+# for route, segments in ROUTE_SEGMENTS.items():
+#     print(f"\n{route}:")
+#     for seg in segments:
+#         print(f"  {seg} → {get_segment_display_name(seg)}")
+# print("=" * 60)
 # ============================================================================
 # AUTHENTICATION
 # ============================================================================
@@ -102,7 +186,7 @@ def logout():
 # CONFIG & STYLE
 # ============================================================================
 st.set_page_config(
-    page_title="SAFE TN – Crash Risk Forecast", 
+    page_title="SAFE TN – Crash Risk Prediction", 
     layout="wide", 
     initial_sidebar_state="expanded"
 )
@@ -132,12 +216,12 @@ st.markdown("""
 # ============================================================================
 # DATA & ROUTES
 # ============================================================================
-ROUTE_SEGMENTS = {
-    "All":  ["segment_01", "segment_02", "segment_03", "segment_04", "segment_05", "segment_06", "segment_07", "segment_08", "segment_09", "segment_10", "segment_11"],
-    "I-40":  ["segment_01", "segment_02", "segment_03"],
-    "I-55":  ["segment_04"],
-    "I-240": ["segment_05", "segment_06", "segment_07", "segment_08", "segment_09", "segment_10", "segment_11"]
-}
+# ROUTE_SEGMENTS = {
+#     "All":  ["segment_01", "segment_02", "segment_03", "segment_04", "segment_05", "segment_06", "segment_07", "segment_08", "segment_09", "segment_10", "segment_11"],
+#     "I-40":  ["segment_01", "segment_02", "segment_03"],
+#     "I-55":  ["segment_04"],
+#     "I-240": ["segment_05", "segment_06", "segment_07", "segment_08", "segment_09", "segment_10", "segment_11"]
+# }
 
 @st.cache_data(ttl=3600)
 def load_segment_data(segment_id):
@@ -294,7 +378,7 @@ def create_historical_plot(historical_df):
     return fig
 
 def create_forecast_plot(future_df):
-    """Create forecast plot with upper, lower, mean - large fonts and borders."""
+    """Create prediction plot with upper, lower, mean - large fonts and borders."""
     import numpy as np
     
     fig = go.Figure()
@@ -326,23 +410,23 @@ def create_forecast_plot(future_df):
         hovertemplate='<b>%{x|%b %d, %Y}</b><br>Upper Bound: %{y:.2f}<extra></extra>'
     ))
     
-    # Mean forecast line WITH DATA LABELS
+    # Mean prediction line WITH DATA LABELS
     fig.add_trace(go.Scatter(
         x=future_df['week_start'], 
         y=future_df['lambda'],
         mode='lines+markers+text',
-        name='Mean Forecast (λ)',
+        name='Mean Prediction (λ)',
         line=dict(color='#ff7f0e', width=3.5),
         marker=dict(size=10, symbol='diamond', color='#ff7f0e', line=dict(color='black', width=1)),
         text=[f"{val:.2f}" for val in future_df['lambda']],
         textposition='top center',
         textfont=dict(size=12, color='black', family='Arial Black'),
-        hovertemplate='<b>Week: %{x|%b %d, %Y}</b><br>Mean Forecast: %{y:.2f}<extra></extra>'
+        hovertemplate='<b>Week: %{x|%b %d, %Y}</b><br>Mean Prediction: %{y:.2f}<extra></extra>'
     ))
     
     fig.update_layout(
         title={
-            'text': '<b>Probabilistic Crash Forecast</b>',
+            'text': '<b>Probabilistic Crash Prediction</b>',
             'font': {'size': 24, 'family': 'Arial', 'color': '#1f77b4'},
             'x': 0.5,
             'xanchor': 'center'
@@ -963,7 +1047,7 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
 # MAIN APP PAGES
 # ============================================================================
 def show_forecast_page():
-    st.title("🏎️ Traffic Crash Risk Forecast for Shelby County")
+    st.title("🏎️ Traffic Crash Risk Prediction for Shelby County")
     
     # Load segmented data for background analysis
     segmented_df = load_segmented_data()
@@ -1037,23 +1121,30 @@ def show_forecast_page():
         
         st.markdown("---")
 
-    # Route & Segment selector
+# Route & Segment selector
     col1, col2 = st.columns([1,2])
     with col1:
         route = st.selectbox("Select Route", options=list(ROUTE_SEGMENTS.keys()), key="route_sel")
     with col2:
-        segment = st.selectbox("Select Segment", options=ROUTE_SEGMENTS[route], key="segment_sel")
+        # Create display names for dropdown
+        segment_options = ROUTE_SEGMENTS[route]
+        segment_display = [get_segment_display_name(seg) for seg in segment_options]
+        
+        selected_display = st.selectbox("Select Segment", options=segment_display, key="segment_sel")
+        
+        # Map back to segment_id
+        segment = segment_options[segment_display.index(selected_display)]
 
     # Load data
     future_df = load_segment_data(segment)
     if future_df is None or future_df.empty:
-        st.error(f"No forecast data found for {segment}")
+        st.error(f"No prediction data found for {segment}")
         st.info("Please check that the data files exist in the expected location.")
         return
 
     historical_df = load_historical_data(segment)
 
-    st.markdown(f"### 🔅 Selected: **{route} ➡️ {segment.upper()}** • {len(future_df)} weeks forecast")
+    st.markdown(f"### 🔅 Selected: **{route} ➡️ {get_segment_display_name(segment)}** • {len(future_df)} weeks prediction")
 
     # Summary metrics
     c1, c2, c3 = st.columns(3)
@@ -1082,8 +1173,8 @@ def show_forecast_page():
     
     st.markdown("---")
     
-    # Forecast plot with border
-    st.subheader("🔅 Probabilistic Crash Forecast")
+    # Prediction plot with border
+    st.subheader("🔅 Probabilistic Crash Prediction")
     st.markdown("""
     <div style="border: 1px solid #1f77b4; border-radius: 10px; padding: 20px; background-color: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
     """, unsafe_allow_html=True)
@@ -1146,11 +1237,11 @@ def show_forecast_page():
 
 def show_help_page():
     st.title("✍️ Help & User Guide")
-    st.markdown("### Understanding Probabilistic Forecasts")
+    st.markdown("### Understanding Probabilistic Predictions")
 
     st.markdown("## ✍️ Reading the Predictions")
     st.markdown("""
-    **Example Forecast:** Week 3 shows "1-2 crashes (Most likely: 1, 36%)"
+    **Example Prediction:** Week 3 shows "1-2 crashes (Most likely: 1, 36%)"
     
     **This means:**
     - We expect between 1-2 crashes based on statistical models
@@ -1219,13 +1310,13 @@ def show_help_page():
         A 95% confidence interval means:
         - 📈 In 95 out of 100 similar weeks, actual crashes will fall within this range
         - 📈 The range accounts for both model uncertainty and random variation
-        - 📈 Wider ranges indicate more uncertainty (often with longer forecast horizons)
-        - 📈 Short-term forecasts tend to have narrower, more precise ranges
+        - 📈 Wider ranges indicate more uncertainty (often with longer prediction horizons)
+        - 📈 Short-term predictions tend to have narrower, more precise ranges
         """)
 
-    with st.expander("How is the forecast generated?"):
+    with st.expander("How is the prediction generated?"):
         st.markdown("""
-        Our forecasting system uses:
+        Our prediction system uses:
         - ⚠️ **Machine learning models** trained on historical crash data
         - ⚠️ **Weather patterns** and seasonal factors
         - ⚠️ **Traffic volume** and flow characteristics
@@ -1270,7 +1361,7 @@ if __name__ == "__main__":
             
             page = st.radio(
                 "Go to", 
-                ["Probabilistic Crash Forecast", "Help & Guide"], 
+                ["Probabilistic Crash Prediction", "Help & Guide"], 
                 label_visibility="collapsed", 
                 key="nav_radio"
             )
@@ -1280,7 +1371,7 @@ if __name__ == "__main__":
             st.markdown("""
             <div class="about-box">
                 <b>About SAFE TN</b><br><br>
-                SAFE TN (<i>Safety Analytics & Forecasting Environment for Tennessee</i>) is a probabilistic crash-risk forecasting tool developed by the 
+                SAFE TN (<i>Safety Analytics & Forecasting Environment for Tennessee</i>) is a probabilistic crash-risk prediction tool developed by the 
                 <b>Center for Transportation Innovation, Education and Research (C-TIER)</b> at The University of Memphis for the 
                 Tennessee Highway Safety Office and the Enforcement agencies.<br><br>
                 Using advanced machine-learning techniques, it delivers weekly crash predictions with certain confidence intervals for Shelby County.
@@ -1293,7 +1384,7 @@ if __name__ == "__main__":
                 has developed this predictive tool with the motive of enhancing traffic safety across Tennessee, by integrating 
                 real-time traffic and crash data.<br><br>
                 Our transportation safety research emphasizes probabilistic 
-                forecasting, behavioral analysis, and engineering solutions to support the <b>Tennessee Highway Safety Office</b>
+                prediction, behavioral analysis, and engineering solutions to support the <b>Tennessee Highway Safety Office</b>
                 and local agencies in deploying precise, high-impact enforcement and infrastructure improvements.
             </div>
             """, unsafe_allow_html=True)
@@ -1307,7 +1398,7 @@ if __name__ == "__main__":
                 logout()
 
         # Main content area
-        if page == "Probabilistic Crash Forecast":
+        if page == "Probabilistic Crash Prediction":
             show_forecast_page()
         elif page == "Help & Guide":
             show_help_page()
