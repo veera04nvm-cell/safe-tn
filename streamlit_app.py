@@ -590,7 +590,7 @@ def create_probability_pie_chart(row):
     
     fig = go.Figure(data=[go.Pie(
         labels=labels,
-        values=[p * 100 for p in probs],  # Convert to percentages
+        values=[p for p in probs],  # Convert to percentages
         hole=0.4,
         marker=dict(
             colors=['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#991b1b'],
