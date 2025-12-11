@@ -403,18 +403,18 @@ def create_forecast_plot(future_df):
         x=future_df['week_start'], 
         y=future_df['lambda'],
         mode='lines+markers+text',
-        name='Mean Forecast (λ)',
+        name='Mean Prediction (λ)',
         line=dict(color='#ff7f0e', width=3.5),
         marker=dict(size=10, symbol='diamond', color='#ff7f0e', line=dict(color='black', width=1)),
         text=[f"{val:,.2f}" for val in future_df['lambda']],  # Added comma formatting
         textposition='top center',
         textfont=dict(size=12, color='black', family='Arial Black'),
-        hovertemplate='<b>Week: %{x|%b %d, %Y}</b><br>Mean Forecast: %{y:,.2f}<extra></extra>'  # Added comma
+        hovertemplate='<b>Week: %{x|%b %d, %Y}</b><br>Mean Prediction: %{y:,.2f}<extra></extra>'  # Added comma
     ))
     
     fig.update_layout(
         title={
-            'text': '<b>Probabilistic Crash Forecast</b>',
+            'text': '<b>Probabilistic Crash Prediction</b>',
             'font': {'size': 24, 'family': 'Arial', 'color': '#1f77b4'},
             'x': 0.5,
             'xanchor': 'center'
@@ -1125,7 +1125,7 @@ def show_forecast_page():
 
     historical_df = load_historical_data(segment)
 
-    st.markdown(f"### 🔅 Selected: **{route} ➡️ {get_segment_display_name(segment)}** • {len(future_df)} weeks prediction")
+    st.markdown(f"### 🔅 Selected ➡️ {get_segment_display_name(segment)}** • {len(future_df)} weeks prediction")
 
     # Summary metrics
     c1, c2, c3 = st.columns(3)
