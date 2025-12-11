@@ -1125,7 +1125,7 @@ def show_forecast_page():
 
     historical_df = load_historical_data(segment)
 
-    st.markdown(f"### 🔅 Selected ➡️ {get_segment_display_name(segment)}** • {len(future_df)} weeks prediction")
+    st.markdown(f"### 🔅 Selected ➡️ {get_segment_display_name(segment)} • {len(future_df)} weeks prediction")
 
     # Summary metrics
     c1, c2, c3 = st.columns(3)
