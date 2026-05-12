@@ -23,7 +23,9 @@ import numpy as np
 # ============================================================================
 # CONFIGURATION — match pipeline output paths
 # ============================================================================
-BASE_OUTPUT_DIR = 'outputs/daily_risk_score'   # pipeline writes here
+BASE_OUTPUT_DIR  = 'outputs/daily_risk_score'   # pipeline writes here
+MAX_MAP_POINTS   = 40_000                        # cap points sent to Plotly map traces
+MAX_CHAT_HISTORY = 15                            # message pairs kept in session state
 
 # ============================================================================
 # AUTHENTICATION
@@ -172,7 +174,6 @@ st.markdown("""
 # ============================================================================
 # RAW CRASH CSV LOADER
 # ============================================================================
-@st.cache_data(ttl=3600)
 def load_crash_shapefile_data(uploaded_file):
     """
     Load raw crash-level data from the uploaded CSV file.
@@ -289,6 +290,531 @@ def get_most_likely_from_probabilities(row):
     most_likely_idx = probs.index(max(probs))
     crash_counts    = [0, 1, 2, 3, "4+"]
     return crash_counts[most_likely_idx], probs[most_likely_idx]
+
+
+# ============================================================================
+# CHATBOT — RULE-BASED RESPONSES
+# ============================================================================
+def chatbot_crash_response(msg, crash_df):
+    m = msg.lower().strip()
+
+    if crash_df is None:
+        return "Please upload crash data first to enable queries."
+
+    # Build MSLINK → route lookup; normalise keys to str
+    route_map = (crash_df[['segment_id', 'route']]
+                 .drop_duplicates('segment_id')
+                 .assign(segment_id=lambda df: df['segment_id'].astype(str))
+                 .set_index('segment_id')['route']
+                 .to_dict())
+
+    def _lbl(seg_id):
+        sid   = str(seg_id)
+        route = route_map.get(sid, '')
+        return f"{route} {sid}".strip() if route else sid
+
+    # ── Greetings & help ────────────────────────────────────────────────────
+    if any(k in m for k in ['hello', 'hi', 'hey', 'howdy']):
+        return ("Hi! I'm CrashBot 🤖\n\n"
+                "Ask me anything about the crash data — segments, fatalities, "
+                "severity, routes, years, hit-and-run, city, night crashes, and more.\n\n"
+                "Type **help** for a full list of topics.")
+
+    if any(k in m for k in ['help', 'what can you', 'what do you', 'capabilities', 'topics', 'options']):
+        return ("**CrashBot can answer questions about:**\n\n"
+                "📊 **Totals** — crashes, fatalities, injuries\n"
+                "🏆 **Rankings** — top 5 / top 10 segments, worst route\n"
+                "📅 **Time** — by year, busiest month, most recent year\n"
+                "🔴 **Severity** — fatal, injury, property damage breakdown\n"
+                "🌙 **Time of day** — night vs day crashes\n"
+                "🚗 **Hit & run** — count and rate\n"
+                "🏙️ **City** — crashes by city\n"
+                "🛣️ **Route** — crashes by route/highway\n"
+                "📍 **Segment** — crashes for a specific segment\n"
+                "🟢 **Risk levels** — what High/Medium/Low/Very Low mean\n"
+                "📈 **Averages** — avg crashes per segment, injury rate\n"
+                "✅ **Safest** — lowest-crash segment or route")
+
+    # ── Totals ───────────────────────────────────────────────────────────────
+    if any(k in m for k in ['total crash', 'how many crash', 'number of crash', 'crash count', 'overall crash']):
+        n = len(crash_df)
+        years = sorted(crash_df['year'].dropna().unique().astype(int).tolist())
+        return (f"**{n:,} total crashes** in the dataset "
+                f"({years[0]}–{years[-1]}).")
+
+    if any(k in m for k in ['fatal', 'death', 'killed', 'fatality']):
+        total  = int(crash_df['fatalities'].sum())
+        by_seg = crash_df.groupby('segment_id')['fatalities'].sum()
+        worst, worst_n = by_seg.idxmax(), int(by_seg.max())
+        pct = total / len(crash_df) * 100
+        return (f"**{total:,} total fatalities** ({pct:.1f}% of all crashes).\n"
+                f"Most fatal segment: **{_lbl(worst)}** ({worst_n:,} fatalities).")
+
+    if any(k in m for k in ['injur', 'how many injur', 'total injur']):
+        total = int(crash_df['injuries'].sum())
+        rate  = total / len(crash_df)
+        return (f"**{total:,} total injuries** across all crashes.\n"
+                f"Average injury rate: **{rate:.2f} injuries per crash**.")
+
+    # ── Severity breakdown ───────────────────────────────────────────────────
+    if any(k in m for k in ['severity', 'severity breakdown', 'crash type', 'property damage', 'incapacitat', 'possible injury']):
+        if 'severity' in crash_df.columns:
+            sv   = crash_df['severity'].value_counts()
+            total = len(crash_df)
+            lines = [f"- **{k}**: {v:,} ({v/total*100:.1f}%)" for k, v in sv.items()]
+            return "**Crash Severity Breakdown:**\n" + "\n".join(lines)
+        return "Severity data not available."
+
+    # ── Segment rankings ─────────────────────────────────────────────────────
+    if any(k in m for k in ['worst segment', 'most crash', 'highest crash', 'most dangerous segment', 'deadliest segment']):
+        by_seg = crash_df.groupby('segment_id').size()
+        seg, cnt = by_seg.idxmax(), by_seg.max()
+        fat = int(crash_df[crash_df['segment_id'] == seg]['fatalities'].sum())
+        return (f"**{_lbl(seg)}** — most dangerous with **{cnt:,} crashes** "
+                f"and **{fat:,} fatalities**.")
+
+    if any(k in m for k in ['safest segment', 'least crash', 'lowest crash', 'best segment']):
+        by_seg = crash_df.groupby('segment_id').size()
+        seg, cnt = by_seg.idxmin(), by_seg.min()
+        return f"**{_lbl(seg)}** has the fewest crashes with **{cnt:,} crash(es)**."
+
+    if any(k in m for k in ['top 10', 'top ten']):
+        top = crash_df.groupby('segment_id').size().nlargest(10)
+        lines = [f"**{i+1}. {_lbl(s)}**: {c:,} crashes" for i, (s, c) in enumerate(top.items())]
+        return "**Top 10 Segments by Crashes:**\n" + "\n".join(lines)
+
+    if any(k in m for k in ['top 5', 'top five', 'top segment', 'ranking', 'ranked']):
+        top = crash_df.groupby('segment_id').size().nlargest(5)
+        lines = [f"**{i+1}. {_lbl(s)}**: {c:,} crashes" for i, (s, c) in enumerate(top.items())]
+        return "**Top 5 Segments by Crashes:**\n" + "\n".join(lines)
+
+    if any(k in m for k in ['average crash', 'avg crash', 'mean crash', 'crashes per segment']):
+        avg = len(crash_df) / crash_df['segment_id'].nunique()
+        return f"**Average crashes per segment:** {avg:.1f} crashes."
+
+    # ── Specific segment lookup ──────────────────────────────────────────────
+    if 'segment' in m and any(c.isdigit() for c in m):
+        import re
+        nums = re.findall(r'\d+', m)
+        for num in nums:
+            seg_data = crash_df[crash_df['segment_id'].astype(str) == num]
+            if not seg_data.empty:
+                cnt  = len(seg_data)
+                fat  = int(seg_data['fatalities'].sum())
+                inj  = int(seg_data['injuries'].sum())
+                route = seg_data['route'].mode()[0] if 'route' in seg_data.columns else '—'
+                return (f"**{_lbl(num)}:**\n"
+                        f"Total crashes: **{cnt:,}**\n"
+                        f"Fatalities: **{fat:,}** | Injuries: **{inj:,}**")
+        return f"No data found for that segment number."
+
+    # ── Hit & run ────────────────────────────────────────────────────────────
+    if any(k in m for k in ['hit and run', 'hit & run', 'hit-and-run', 'hit run']):
+        hr  = crash_df['hit_and_run'].eq('Yes').sum() if 'hit_and_run' in crash_df.columns else 0
+        pct = hr / len(crash_df) * 100
+        by_seg = crash_df[crash_df['hit_and_run'] == 'Yes'].groupby('segment_id').size()
+        worst  = by_seg.idxmax() if not by_seg.empty else '—'
+        worst_n = int(by_seg.max()) if not by_seg.empty else 0
+        return (f"**{hr:,} hit-and-run crashes** — {pct:.1f}% of all crashes.\n"
+                f"Worst segment: **{_lbl(worst)}** with {worst_n:,} hit-and-run cases.")
+
+    # ── Segment count ────────────────────────────────────────────────────────
+    if any(k in m for k in ['unique segment', 'how many segment', 'number of segment', 'total segment', 'segment count']):
+        n = crash_df['segment_id'].nunique()
+        return f"There are **{n:,} unique road segments** monitored in the dataset."
+
+    # ── Time / year ──────────────────────────────────────────────────────────
+    if any(k in m for k in ['by year', 'yearly', 'annual', 'each year', 'per year', 'year breakdown', 'trend']):
+        yearly = crash_df.groupby('year').size().sort_index()
+        lines  = [f"**{int(yr)}**: {cnt:,} crashes" for yr, cnt in yearly.items()]
+        peak_yr = int(yearly.idxmax())
+        return ("**Crashes by Year:**\n" + "\n".join(lines) +
+                f"\n\nPeak year: **{peak_yr}** ({int(yearly.max()):,} crashes)")
+
+    if any(k in m for k in ['recent year', 'latest year', 'last year', 'most recent']):
+        latest = int(crash_df['year'].max())
+        cnt    = int((crash_df['year'] == latest).sum())
+        return f"Most recent year in the dataset: **{latest}** with **{cnt:,} crashes**."
+
+    if any(k in m for k in ['month', 'monthly', 'busiest month', 'worst month']):
+        if 'Date of Crash' in crash_df.columns:
+            months = pd.to_datetime(crash_df['Date of Crash'], errors='coerce').dt.month
+            mc     = months.value_counts().sort_index()
+            names  = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+            lines  = [f"**{names[m-1]}**: {c:,}" for m, c in mc.items()]
+            peak_m = names[int(mc.idxmax()) - 1]
+            return ("**Crashes by Month:**\n" + "\n".join(lines) +
+                    f"\n\nBusiest month: **{peak_m}**")
+        return "Date information not available for monthly breakdown."
+
+    # ── Night vs day ─────────────────────────────────────────────────────────
+    if any(k in m for k in ['night', 'dark', 'day vs night', 'daytime', 'nighttime', 'light condition', 'time of day']):
+        if 'Light Condition' in crash_df.columns:
+            lc = crash_df['Light Condition'].value_counts()
+            dark_cnt = sum(v for k, v in lc.items() if any(t in str(k).lower() for t in ['dark', 'night']))
+            day_cnt  = sum(v for k, v in lc.items() if not any(t in str(k).lower() for t in ['dark', 'night']))
+            total    = len(crash_df)
+            return (f"**Day vs Night Crashes:**\n"
+                    f"☀️ Daytime: **{day_cnt:,}** ({day_cnt/total*100:.1f}%)\n"
+                    f"🌙 Nighttime/Dark: **{dark_cnt:,}** ({dark_cnt/total*100:.1f}%)")
+        return "Light condition data not available."
+
+    # ── City ─────────────────────────────────────────────────────────────────
+    if any(k in m for k in ['city', 'cities', 'by city', 'which city', 'memphis']):
+        if 'city' in crash_df.columns:
+            by_city = crash_df.groupby('city').size().nlargest(5)
+            lines   = [f"**{c}**: {n:,} crashes" for c, n in by_city.items()]
+            return "**Top 5 Cities by Crashes:**\n" + "\n".join(lines)
+        return "City data not available."
+
+    # ── Route ────────────────────────────────────────────────────────────────
+    if any(k in m for k in ['route', 'highway', 'interstate', 'i-240', 'i-40', 'i-55', 'which road', 'by route']):
+        if 'route' in crash_df.columns:
+            by_route = crash_df.groupby('route').size().nlargest(5)
+            lines    = [f"**{r}**: {n:,} crashes" for r, n in by_route.items()]
+            return "**Top 5 Routes by Crashes:**\n" + "\n".join(lines)
+        return "Route data not available."
+
+    # ── Risk level explanation ───────────────────────────────────────────────
+    if any(k in m for k in ['risk level', 'risk mean', 'what is risk', 'high risk', 'low risk', 'very low risk', 'medium risk']):
+        return ("**Risk Levels (based on daily expected crashes λ):**\n"
+                "🟢 **Very Low** (λ < 0.2): Low probability of any crash. Standard patrol.\n"
+                "🟡 **Low** (λ 0.2–0.5): Moderate probability. Maintain readiness.\n"
+                "🟠 **Medium** (λ 0.5–1.0): Likely at least one crash. Increase vigilance.\n"
+                "🔴 **High** (λ ≥ 1.0): One or more crashes highly likely. Max enforcement.")
+
+    # ── Summary / overview ───────────────────────────────────────────────────
+    if any(k in m for k in ['summary', 'overview', 'give me a summary', 'overall', 'snapshot']):
+        n      = len(crash_df)
+        fat    = int(crash_df['fatalities'].sum())
+        inj    = int(crash_df['injuries'].sum())
+        segs   = crash_df['segment_id'].nunique()
+        years  = sorted(crash_df['year'].dropna().unique().astype(int).tolist())
+        by_seg = crash_df.groupby('segment_id').size()
+        worst  = by_seg.idxmax()
+        return (f"**Dataset Summary:**\n"
+                f"📅 Period: **{years[0]}–{years[-1]}**\n"
+                f"💥 Total crashes: **{n:,}**\n"
+                f"💀 Fatalities: **{fat:,}** | 🤕 Injuries: **{inj:,}**\n"
+                f"📍 Segments monitored: **{segs:,}**\n"
+                f"⚠️ Most dangerous segment: **{_lbl(worst)}**")
+
+    return ("I didn't quite understand that. Try asking:\n"
+            "- *'Give me a summary'*\n"
+            "- *'Top 10 segments'*\n"
+            "- *'Crashes by year'*\n"
+            "- *'Night vs day crashes'*\n"
+            "- *'Severity breakdown'*\n"
+            "- *'Crashes in segment 12345'*\n\n"
+            "Type **help** for the full topic list.")
+
+
+def chatbot_forecast_response(msg, future_df, historical_df, mslink, route_name=''):
+    m         = msg.lower().strip()
+    today     = datetime.now().date()
+    seg_label = f"{route_name} {mslink}".strip() if route_name else str(mslink)
+
+    if future_df is None or future_df.empty:
+        return "No forecast data loaded. Please select a segment first."
+
+    # ── Greetings & help ────────────────────────────────────────────────────
+    if any(k in m for k in ['hello', 'hi', 'hey', 'howdy']):
+        return (f"Hi! I'm CrashBot 🤖\n\n"
+                f"I have the full forecast for **{seg_label}**.\n"
+                f"Ask me about today's risk, peak days, weekly summaries, lambda, "
+                f"confidence intervals, and more.\n\nType **help** for all topics.")
+
+    if any(k in m for k in ['help', 'what can you', 'what do you', 'capabilities', 'topics', 'options']):
+        return ("**CrashBot can answer questions about:**\n\n"
+                "📅 **Today / Tomorrow** — risk level and expected crashes\n"
+                "📆 **This week / Next week** — weekly risk summary\n"
+                "🔴 **Peak day** — highest risk day in the forecast\n"
+                "🟢 **Safest day** — lowest risk day in the forecast\n"
+                "📊 **Risk breakdown** — count of High/Medium/Low/Very Low days\n"
+                "📈 **Average / Total λ** — expected crash statistics\n"
+                "🎲 **Lambda** — what it means and how to interpret it\n"
+                "📏 **Confidence interval** — what the upper/lower bounds mean\n"
+                "🗓️ **Forecast range** — start/end dates, number of days\n"
+                "📉 **Historical data** — past crash totals and busiest day\n"
+                "🤖 **Model** — how the predictions are made\n"
+                "🛡️ **Risk levels** — what High/Medium/Low/Very Low mean\n"
+                "🗂️ **Summary** — full overview of this segment's forecast")
+
+    # ── Today ────────────────────────────────────────────────────────────────
+    if any(k in m for k in ['today', 'current risk', 'risk today', 'right now']):
+        rows = future_df[future_df['date'].dt.date == today]
+        if not rows.empty:
+            row = rows.iloc[0]
+            level, _ = get_risk_level(row['lambda'])
+            ml = row.get('most_likely_crashes', '—')
+            return (f"**{seg_label} — Today ({today.strftime('%b %d, %Y')}):**\n"
+                    f"🔴 Risk Level: **{level}**\n"
+                    f"λ (expected crashes): **{row['lambda']:.3f}**\n"
+                    f"Most likely outcome: **{ml} crash(es)**\n"
+                    f"Lower bound: {row.get('predicted_lower', '—')} | "
+                    f"Upper bound: {row.get('predicted_upper', '—')}")
+        return (f"Today ({today.strftime('%b %d')}) is outside the forecast window.\n"
+                f"Forecast runs: **{future_df['date'].min().strftime('%b %d')}** → "
+                f"**{future_df['date'].max().strftime('%b %d, %Y')}**")
+
+    # ── Tomorrow ─────────────────────────────────────────────────────────────
+    if any(k in m for k in ['tomorrow', 'next day', 'tomorrow risk']):
+        tomorrow = today + timedelta(days=1)
+        rows = future_df[future_df['date'].dt.date == tomorrow]
+        if not rows.empty:
+            row = rows.iloc[0]
+            level, _ = get_risk_level(row['lambda'])
+            return (f"**{seg_label} — Tomorrow ({tomorrow.strftime('%b %d, %Y')}):**\n"
+                    f"Risk Level: **{level}**\n"
+                    f"λ: **{row['lambda']:.3f}**\n"
+                    f"Most likely: **{row.get('most_likely_crashes', '—')} crash(es)**")
+        return "Tomorrow is outside the forecast window."
+
+    # ── This week ────────────────────────────────────────────────────────────
+    if any(k in m for k in ['this week', 'current week', 'week ahead']):
+        week_end = today + timedelta(days=6)
+        wdf = future_df[(future_df['date'].dt.date >= today) &
+                        (future_df['date'].dt.date <= week_end)]
+        if wdf.empty:
+            return "No forecast data for this week."
+        peak  = wdf.loc[wdf['lambda'].idxmax()]
+        level, _ = get_risk_level(peak['lambda'])
+        total = wdf['lambda'].sum()
+        return (f"**This Week — {seg_label}:**\n"
+                f"Days covered: **{len(wdf)}**\n"
+                f"Total expected crashes: **{total:.2f}**\n"
+                f"Peak day: **{peak['date'].strftime('%A, %b %d')}** ({level}, λ={peak['lambda']:.3f})")
+
+    # ── Next week ────────────────────────────────────────────────────────────
+    if any(k in m for k in ['next week', 'following week']):
+        nw_start = today + timedelta(days=7)
+        nw_end   = today + timedelta(days=13)
+        wdf = future_df[(future_df['date'].dt.date >= nw_start) &
+                        (future_df['date'].dt.date <= nw_end)]
+        if wdf.empty:
+            return "Next week is outside the forecast window."
+        peak  = wdf.loc[wdf['lambda'].idxmax()]
+        level, _ = get_risk_level(peak['lambda'])
+        total = wdf['lambda'].sum()
+        return (f"**Next Week ({nw_start.strftime('%b %d')}–{nw_end.strftime('%b %d')}) — {seg_label}:**\n"
+                f"Days covered: **{len(wdf)}**\n"
+                f"Total expected crashes: **{total:.2f}**\n"
+                f"Peak day: **{peak['date'].strftime('%A, %b %d')}** ({level}, λ={peak['lambda']:.3f})")
+
+    # ── Weekend ──────────────────────────────────────────────────────────────
+    if any(k in m for k in ['weekend', 'saturday', 'sunday']):
+        wdf = future_df[future_df['date'].dt.dayofweek >= 5]
+        if wdf.empty:
+            return "No weekend days in the forecast window."
+        avg   = wdf['lambda'].mean()
+        level, _ = get_risk_level(avg)
+        return (f"**Weekend Risk — {seg_label}:**\n"
+                f"Weekend days in forecast: **{len(wdf)}**\n"
+                f"Average λ: **{avg:.3f}** ({level})\n"
+                f"Total expected crashes: **{wdf['lambda'].sum():.2f}**")
+
+    # ── Weekday ──────────────────────────────────────────────────────────────
+    if any(k in m for k in ['weekday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday']):
+        wdf = future_df[future_df['date'].dt.dayofweek < 5]
+        avg = wdf['lambda'].mean()
+        level, _ = get_risk_level(avg)
+        return (f"**Weekday Risk — {seg_label}:**\n"
+                f"Weekdays in forecast: **{len(wdf)}**\n"
+                f"Average λ: **{avg:.3f}** ({level})\n"
+                f"Total expected crashes: **{wdf['lambda'].sum():.2f}**")
+
+    # ── Peak / worst day ─────────────────────────────────────────────────────
+    if any(k in m for k in ['peak', 'worst day', 'highest risk', 'most dangerous day', 'maximum', 'riskiest']):
+        row      = future_df.loc[future_df['lambda'].idxmax()]
+        level, _ = get_risk_level(row['lambda'])
+        return (f"**Peak Risk Day — {seg_label}:**\n"
+                f"📅 **{row['date'].strftime('%A, %b %d, %Y')}**\n"
+                f"Risk: **{level}**\n"
+                f"λ = **{row['lambda']:.3f}**\n"
+                f"Most likely: **{row.get('most_likely_crashes', '—')} crash(es)**")
+
+    # ── Safest day ───────────────────────────────────────────────────────────
+    if any(k in m for k in ['safest', 'lowest risk', 'best day', 'minimum risk', 'least dangerous']):
+        row      = future_df.loc[future_df['lambda'].idxmin()]
+        level, _ = get_risk_level(row['lambda'])
+        return (f"**Safest Day — {seg_label}:**\n"
+                f"📅 **{row['date'].strftime('%A, %b %d, %Y')}**\n"
+                f"Risk: **{level}**\n"
+                f"λ = **{row['lambda']:.3f}**")
+
+    # ── Risk breakdown ───────────────────────────────────────────────────────
+    if any(k in m for k in ['risk breakdown', 'risk day', 'how many high', 'how many low',
+                             'how many medium', 'breakdown', 'distribution']):
+        if 'risk_level' in future_df.columns:
+            counts = future_df['risk_level'].value_counts()
+            total  = len(future_df)
+            lines  = [f"- 🔴 **High**: {counts.get('High', 0)} days ({counts.get('High', 0)/total*100:.0f}%)",
+                      f"- 🟠 **Medium**: {counts.get('Medium', 0)} days ({counts.get('Medium', 0)/total*100:.0f}%)",
+                      f"- 🟡 **Low**: {counts.get('Low', 0)} days ({counts.get('Low', 0)/total*100:.0f}%)",
+                      f"- 🟢 **Very Low**: {counts.get('Very Low', 0)} days ({counts.get('Very Low', 0)/total*100:.0f}%)"]
+            return f"**Risk Day Breakdown — {seg_label} ({total} days):**\n" + "\n".join(lines)
+        n = int((future_df['lambda'] >= 1.0).sum())
+        return f"**{n} High-Risk days** (λ ≥ 1.0) in the forecast period."
+
+    # ── Average / total ──────────────────────────────────────────────────────
+    if any(k in m for k in ['average', 'mean', 'avg lambda', 'average lambda', 'average risk']):
+        avg      = future_df['lambda'].mean()
+        level, _ = get_risk_level(avg)
+        mn, mx   = future_df['lambda'].min(), future_df['lambda'].max()
+        return (f"**Average Daily λ — {seg_label}:**\n"
+                f"Mean: **{avg:.3f}** ({level})\n"
+                f"Min: {mn:.3f} | Max: {mx:.3f}")
+
+    if any(k in m for k in ['total crash', 'total expected', 'total lambda', 'sum', 'overall expected']):
+        total = future_df['lambda'].sum()
+        n     = len(future_df)
+        return (f"**Total Expected Crashes — {seg_label}:**\n"
+                f"Over **{n} days**: Σλ = **{total:.2f}** (≈ **{round(total)} crashes**)")
+
+    # ── Lambda explanation ───────────────────────────────────────────────────
+    if any(k in m for k in ['lambda', 'what is λ', 'λ mean', 'poisson', 'expected crash']):
+        return ("**Lambda (λ)** is the expected (average) number of crashes on a given day, "
+                "from a Poisson statistical model.\n\n"
+                "**How to read it:**\n"
+                "- λ = 0.1 → ~9% chance of any crash\n"
+                "- λ = 0.2 → ~18% chance of a crash\n"
+                "- λ = 0.5 → ~39% chance of a crash\n"
+                "- λ = 1.0 → ~63% chance of at least 1 crash\n"
+                "- λ = 2.0 → ~86% chance of at least 1 crash\n\n"
+                "A higher λ = higher expected crash frequency.")
+
+    # ── Confidence interval ──────────────────────────────────────────────────
+    if any(k in m for k in ['confidence', 'interval', 'upper bound', 'lower bound', 'uncertainty', '95%']):
+        return ("**Confidence Interval (95%):**\n\n"
+                "The upper and lower bounds represent the range within which the actual "
+                "crash count is expected to fall **95 out of 100 similar days**.\n\n"
+                "- **Lower bound** — optimistic scenario (fewer crashes)\n"
+                "- **Upper bound** — pessimistic scenario (more crashes)\n"
+                "- The interval widens further into the future as uncertainty grows.\n\n"
+                "Use the upper bound for conservative resource deployment.")
+
+    # ── How the model works ──────────────────────────────────────────────────
+    if any(k in m for k in ['model', 'how is it predicted', 'how does it work', 'algorithm',
+                             'machine learning', 'prediction method', 'how predict']):
+        return ("**How Predictions Are Made:**\n\n"
+                "The forecast uses an **ensemble of 3 ML models** (Random Forest, "
+                "Gradient Boosting, Ridge Regression) combined with seasonal patterns:\n\n"
+                "| Days ahead | Method |\n"
+                "|---|---|\n"
+                "| 1–14 | Pure ML ensemble |\n"
+                "| 15–30 | ML + light seasonal blend |\n"
+                "| 31–60 | Heavier seasonal blend |\n"
+                "| 61+ | Historical seasonal mean |\n\n"
+                "Each segment has its own trained model based on its individual crash history.")
+
+    # ── Forecast range ───────────────────────────────────────────────────────
+    if any(k in m for k in ['forecast period', 'how many day', 'date range', 'forecast range',
+                             'start date', 'end date', 'when does']):
+        start = future_df['date'].min().strftime('%b %d, %Y')
+        end   = future_df['date'].max().strftime('%b %d, %Y')
+        return (f"**Forecast Range — {seg_label}:**\n"
+                f"📅 **{start}** to **{end}**\n"
+                f"Total: **{len(future_df)} days**")
+
+    # ── Historical data ──────────────────────────────────────────────────────
+    if any(k in m for k in ['historical', 'past crash', 'history', 'previous crash', 'past data']):
+        if historical_df is not None and not historical_df.empty:
+            total    = int(historical_df['crash_count'].sum())
+            avg      = historical_df['crash_count'].mean()
+            peak_day = historical_df.loc[historical_df['crash_count'].idxmax(), 'date']
+            zero_days = int((historical_df['crash_count'] == 0).sum())
+            return (f"**Historical Data — {seg_label}:**\n"
+                    f"Total recorded crashes: **{total:,}**\n"
+                    f"Daily average: **{avg:.2f}**\n"
+                    f"Busiest day: **{peak_day.strftime('%b %d, %Y')}**\n"
+                    f"Zero-crash days: **{zero_days:,}**")
+        return "No historical data available for this segment."
+
+    # ── Risk level explanation ───────────────────────────────────────────────
+    if any(k in m for k in ['risk level', 'risk mean', 'what is risk', 'high risk mean',
+                             'very low mean', 'medium mean']):
+        return ("**Daily Risk Levels:**\n"
+                "🟢 **Very Low** (λ < 0.2): Low probability. Standard patrol.\n"
+                "🟡 **Low** (λ 0.2–0.5): Moderate. Maintain readiness.\n"
+                "🟠 **Medium** (λ 0.5–1.0): Likely one crash. Increase vigilance.\n"
+                "🔴 **High** (λ ≥ 1.0): One or more crashes highly likely. Max enforcement.")
+
+    # ── Summary / overview ───────────────────────────────────────────────────
+    if any(k in m for k in ['summary', 'overview', 'give me a summary', 'overall', 'snapshot', 'brief']):
+        avg      = future_df['lambda'].mean()
+        total    = future_df['lambda'].sum()
+        peak     = future_df.loc[future_df['lambda'].idxmax()]
+        safe     = future_df.loc[future_df['lambda'].idxmin()]
+        lv, _    = get_risk_level(avg)
+        if 'risk_level' in future_df.columns:
+            high_n = int((future_df['risk_level'] == 'High').sum())
+        else:
+            high_n = int((future_df['lambda'] >= 1.0).sum())
+        return (f"**Forecast Summary — {seg_label}:**\n"
+                f"📅 {future_df['date'].min().strftime('%b %d')} → "
+                f"{future_df['date'].max().strftime('%b %d, %Y')} ({len(future_df)} days)\n"
+                f"📈 Avg daily λ: **{avg:.3f}** ({lv})\n"
+                f"💥 Total expected: **{total:.1f} crashes**\n"
+                f"🔴 High-risk days: **{high_n}**\n"
+                f"⚠️ Peak: **{peak['date'].strftime('%A, %b %d')}** (λ={peak['lambda']:.3f})\n"
+                f"✅ Safest: **{safe['date'].strftime('%A, %b %d')}** (λ={safe['lambda']:.3f})")
+
+    return ("I didn't quite understand that. Try:\n"
+            "- *'Give me a summary'*\n"
+            "- *'What is the risk today?'*\n"
+            "- *'Risk this week'*\n"
+            "- *'Peak risk day'*\n"
+            "- *'Risk breakdown'*\n"
+            "- *'How does the model work?'*\n\n"
+            "Type **help** for the full topic list.")
+
+
+def show_crashbot_sidebar(history_key, response_fn):
+    """Render CrashBot in the sidebar. Uses a form to avoid the double-render loop."""
+    if history_key not in st.session_state:
+        st.session_state[history_key] = []
+
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### 🤖 CrashBot")
+        st.caption("Ask questions about the data on this page.")
+
+        # Show last 8 messages (4 pairs) — keeps sidebar compact
+        recent = st.session_state[history_key][-8:]
+        for role, content in recent:
+            if role == "user":
+                st.markdown(
+                    f'<div style="background:#dbeafe;padding:8px 10px;border-radius:8px;'
+                    f'margin:4px 0;font-size:12px;"><b>You:</b><br>{content}</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    f'<div style="background:#f0fdf4;padding:8px 10px;border-radius:8px;'
+                    f'margin:4px 0;font-size:12px;"><b>🤖 CrashBot:</b><br>{content}</div>',
+                    unsafe_allow_html=True
+                )
+
+        if st.session_state[history_key]:
+            if st.button("🗑 Clear chat", key=f"clear_{history_key}", use_container_width=True):
+                st.session_state[history_key] = []
+                st.rerun()
+
+        with st.form(key=f"crashbot_form_{history_key}", clear_on_submit=True):
+            user_input = st.text_input(
+                "message", placeholder="Type your question...",
+                label_visibility="collapsed"
+            )
+            submitted = st.form_submit_button("➤ Ask CrashBot", use_container_width=True)
+
+        if submitted and user_input.strip():
+            reply = response_fn(user_input.strip())
+            st.session_state[history_key].extend(
+                [("user", user_input.strip()), ("assistant", reply)]
+            )
+            if len(st.session_state[history_key]) > MAX_CHAT_HISTORY * 2:
+                st.session_state[history_key] = st.session_state[history_key][-MAX_CHAT_HISTORY * 2:]
+            st.rerun()
 
 
 # ============================================================================
@@ -473,32 +999,85 @@ def create_risk_calendar_heatmap(future_df):
     df = future_df.copy()
     df['dow']      = df['date'].dt.dayofweek
     df['week_num'] = ((df['date'] - df['date'].min()).dt.days // 7)
-    pivot = df.pivot(index='week_num', columns='dow', values='lambda')
+
+    # Ensure risk_level column exists
+    if 'risk_level' not in df.columns:
+        df['risk_level'] = df['lambda'].apply(
+            lambda x: 'High' if x >= 1.0 else 'Medium' if x >= 0.5 else 'Low' if x >= 0.2 else 'Very Low'
+        )
+
+    pivot_lam  = df.pivot(index='week_num', columns='dow', values='lambda')
+    pivot_risk = df.pivot(index='week_num', columns='dow', values='risk_level')
+    pivot_date = df.pivot(index='week_num', columns='dow', values='date')
 
     day_names   = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
     week_labels = []
-    for wn in pivot.index:
+    for wn in pivot_lam.index:
         first = df[df['week_num'] == wn]['date'].min()
-        week_labels.append(first.strftime('Wk %b %d'))
+        week_labels.append(first.strftime('%b %d'))
+
+    # Build rich hover text: actual date + λ + risk level per cell
+    hover = []
+    for wn in pivot_lam.index:
+        row_hover = []
+        for dow in pivot_lam.columns:
+            lam  = pivot_lam.loc[wn, dow]
+            risk = pivot_risk.loc[wn, dow] if dow in pivot_risk.columns else '—'
+            dt   = pivot_date.loc[wn, dow]
+            dt_s = pd.Timestamp(dt).strftime('%a, %b %d %Y') if pd.notna(dt) else '—'
+            lam_s = f"{lam:.3f}" if pd.notna(lam) else '—'
+            row_hover.append(f"<b>{dt_s}</b><br>λ: {lam_s}<br>Risk: <b>{risk}</b>")
+        hover.append(row_hover)
+
+    # ── Fixed colorscale anchored to exact risk thresholds ──────────────────
+    # zmax = 2.0  →  boundary fractions: Very Low ends at 0.2/2=0.10,
+    #                Low ends at 0.5/2=0.25, High starts at 1.0/2=0.50
+    ZMAX = 2.0
+    risk_colorscale = [
+        [0.000, '#28a745'],   # Very Low — green
+        [0.099, '#28a745'],
+        [0.100, '#ffc107'],   # Low — yellow   (λ = 0.2)
+        [0.249, '#ffc107'],
+        [0.250, '#fd7e14'],   # Medium — orange (λ = 0.5)
+        [0.499, '#fd7e14'],
+        [0.500, '#dc3545'],   # High — red      (λ = 1.0)
+        [1.000, '#6b0000'],   # deep red for λ ≥ 2.0
+    ]
 
     fig = go.Figure(go.Heatmap(
-        z=pivot.values,
-        x=[day_names[i] for i in pivot.columns],
+        z=pivot_lam.values,
+        x=[day_names[i] for i in pivot_lam.columns],
         y=week_labels,
-        colorscale='RdYlGn_r', zmin=0,
-        colorbar=dict(title='<b>λ</b>', thickness=15),
-        hovertemplate='<b>%{y} — %{x}</b><br>λ: %{z:.3f}<extra></extra>'
+        colorscale=risk_colorscale,
+        zmin=0,
+        zmax=ZMAX,
+        xgap=2,
+        ygap=2,
+        colorbar=dict(
+            title=dict(text='<b>Risk Level</b>', font=dict(size=14, family='Arial')),
+            thickness=20,
+            tickvals=[0.1, 0.35, 0.75, 1.5],
+            ticktext=['🟢 Very Low (λ<0.2)',
+                      '🟡 Low (λ 0.2–0.5)',
+                      '🟠 Medium (λ 0.5–1.0)',
+                      '🔴 High (λ≥1.0)'],
+            tickfont=dict(size=12, family='Arial'),
+            len=0.85,
+        ),
+        text=hover,
+        hovertemplate='%{text}<extra></extra>',
     ))
+
     fig.update_layout(
         title=dict(text='<b>Daily Risk Calendar</b>',
                    font=dict(size=22, family='Arial', color='#1f77b4'), x=0.5, xanchor='center'),
-        xaxis=dict(title='<b>Day of Week</b>', tickfont=dict(size=14),
+        xaxis=dict(title='<b>Day of Week</b>', tickfont=dict(size=14, family='Arial'),
                    linecolor='black', linewidth=2, mirror=True),
-        yaxis=dict(title='<b>Week</b>', tickfont=dict(size=13), autorange='reversed',
-                   linecolor='black', linewidth=2, mirror=True),
-        height=max(300, 60 * len(week_labels)),
-        margin=dict(l=100, r=40, t=80, b=60),
-        paper_bgcolor='white', plot_bgcolor='white'
+        yaxis=dict(title='<b>Week</b>', tickfont=dict(size=13, family='Arial'),
+                   autorange='reversed', linecolor='black', linewidth=2, mirror=True),
+        height=max(350, 70 * len(week_labels)),
+        margin=dict(l=110, r=180, t=80, b=60),
+        paper_bgcolor='white', plot_bgcolor='#444444'
     )
     return fig
 
@@ -507,10 +1086,11 @@ def create_risk_calendar_heatmap(future_df):
 # PLOTS — HOTSPOT PAGE
 # ============================================================================
 def create_monthly_crashes_plot(df, selected_year=None, selected_route=None, selected_segment=None):
-    filtered_df = df.copy()
+    filtered_df = df
     if selected_year  and selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['Year Of Crash'] == int(selected_year)]
     if selected_route and selected_route != "All Routes": filtered_df = filtered_df[filtered_df['Route'] == selected_route]
     if selected_segment and selected_segment != "All Segments": filtered_df = filtered_df[filtered_df['Segment ID'] == selected_segment]
+    filtered_df = filtered_df.copy()
 
     filtered_df['Crash Date'] = pd.to_datetime(filtered_df['Date of Crash'], errors='coerce')
     filtered_df = filtered_df.dropna(subset=['Crash Date'])
@@ -561,7 +1141,7 @@ def create_monthly_crashes_plot(df, selected_year=None, selected_route=None, sel
 
 
 def create_day_night_crashes_plot(df, selected_year=None, selected_route=None):
-    filtered_df = df.copy()
+    filtered_df = df
     if selected_year  and selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['Year Of Crash'] == int(selected_year)]
     if selected_route and selected_route != "All Routes": filtered_df = filtered_df[filtered_df['Route'] == selected_route]
 
@@ -606,7 +1186,7 @@ def create_day_night_crashes_plot(df, selected_year=None, selected_route=None):
         title=dict(text='<b>✨ Top 10 Segments: Day vs Night Crash Comparison</b>',
                    font=dict(size=24, family='Arial', color='#1f77b4'), x=0.5, xanchor='center'),
         xaxis_title=dict(text='<b>Number of Crashes</b>',              font=dict(size=20, family='Arial', color='black')),
-        yaxis_title=dict(text='<b>MSLINK (Ranked by Total Crashes)</b>', font=dict(size=20, family='Arial', color='black')),
+        yaxis_title=dict(text='<b>Segment (Ranked by Total Crashes)</b>', font=dict(size=20, family='Arial', color='black')),
         height=650, template='plotly_white', paper_bgcolor='white', plot_bgcolor='white',
         barmode='group', bargap=0.15, bargroupgap=0.05,
         legend=dict(orientation="h", yanchor="top", y=0.98, xanchor="center", x=1.15,
@@ -622,7 +1202,7 @@ def create_day_night_crashes_plot(df, selected_year=None, selected_route=None):
 
 
 def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
-    filtered_df = df.copy()
+    filtered_df = df
     if selected_year  and selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['Year Of Crash'] == int(selected_year)]
     if selected_route and selected_route != "All Routes": filtered_df = filtered_df[filtered_df['Route'] == selected_route]
 
@@ -637,25 +1217,29 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
     fig1.add_trace(go.Bar(
         x=crash_counts['Rank'], y=crash_counts['Total Crashes'],
         marker=dict(color=crash_counts['Color'], line=dict(color='black', width=2)), width=0.6,
-        text=[f"<b>{seg}</b><br>{count:,} crashes" for seg, count in zip(crash_counts['Segment ID'], crash_counts['Total Crashes'])],
-        textposition='outside', textfont=dict(size=14, color='black', family='Arial Black'),
-        hovertemplate='<b>Rank %{x}</b><br>MSLINK: %{customdata[0]}<br>Route: %{customdata[1]}<br>Crashes: %{y:,.0f}<extra></extra>',
+        text=[f"<b>{seg}</b><br><b>{count:,}</b>" for seg, count in zip(crash_counts['Segment ID'], crash_counts['Total Crashes'])],
+        textposition='outside', textfont=dict(size=15, color='black', family='Arial Black'),
+        cliponaxis=False,
+        hovertemplate='<b>Rank %{x}</b><br>Segment: %{customdata[0]}<br>Route: %{customdata[1]}<br>Crashes: %{y:,.0f}<extra></extra>',
         customdata=crash_counts[['Segment ID', 'Route']].values
     ))
+    _max1 = crash_counts['Total Crashes'].max() if len(crash_counts) else 1
     fig1.update_layout(
         title=dict(text='<b>✨ Top 10 Segments by Total Crashes</b>',
                    font=dict(size=24, family='Arial', color='#1f77b4'), x=0.5, xanchor='center'),
         xaxis_title=dict(text='<b>Rank</b>',               font=dict(size=19, family='Arial', color='black')),
         yaxis_title=dict(text='<b>Number of Crashes</b>', font=dict(size=19, family='Arial', color='black')),
-        height=650, template='plotly_white', showlegend=False,
+        height=600, template='plotly_white', showlegend=False,
         paper_bgcolor='white', plot_bgcolor='#f8f9fa',
+        uniformtext=dict(minsize=11, mode='hide'),
         xaxis=dict(showgrid=False, tickfont=dict(size=16, family='Arial Black', color='black'),
                    linecolor='black', linewidth=2.5, mirror=True,
                    tickmode='linear', tick0=1, dtick=1, range=[0.5, 10.5]),
         yaxis=dict(showgrid=True, gridwidth=1.5, gridcolor='rgba(200,200,200,0.4)',
                    tickfont=dict(size=16, family='Arial', color='black'),
                    linecolor='black', linewidth=2.5, mirror=True,
-                   zeroline=True, zerolinewidth=2, zerolinecolor='black', separatethousands=True),
+                   zeroline=True, zerolinewidth=2, zerolinecolor='black', separatethousands=True,
+                   range=[0, _max1 * 1.35]),
         margin=dict(l=80, r=40, t=90, b=80)
     )
 
@@ -671,32 +1255,36 @@ def create_segment_ranking_plots(df, selected_year=None, selected_route=None):
     fig2.add_trace(go.Bar(
         x=hit_run_counts['Rank'], y=hit_run_counts['Hit and Run Cases'],
         marker=dict(color=hit_run_counts['Color'], line=dict(color='black', width=2)), width=0.6,
-        text=[f"<b>{seg}</b><br>{count:,} cases" for seg, count in zip(hit_run_counts['Segment ID'], hit_run_counts['Hit and Run Cases'])],
-        textposition='outside', textfont=dict(size=14, color='black', family='Arial Black'),
-        hovertemplate='<b>Rank %{x}</b><br>MSLINK: %{customdata[0]}<br>Route: %{customdata[1]}<br>Hit & Run: %{y:,.0f}<extra></extra>',
+        text=[f"<b>{seg}</b><br><b>{count:,}</b>" for seg, count in zip(hit_run_counts['Segment ID'], hit_run_counts['Hit and Run Cases'])],
+        textposition='outside', textfont=dict(size=15, color='black', family='Arial Black'),
+        cliponaxis=False,
+        hovertemplate='<b>Rank %{x}</b><br>Segment: %{customdata[0]}<br>Route: %{customdata[1]}<br>Hit & Run: %{y:,.0f}<extra></extra>',
         customdata=hit_run_counts[['Segment ID', 'Route']].values
     ))
+    _max2 = hit_run_counts['Hit and Run Cases'].max() if len(hit_run_counts) else 1
     fig2.update_layout(
         title=dict(text='<b>✨ Top 10 Segments by Hit and Run Cases</b>',
                    font=dict(size=24, family='Arial', color='#dc3545'), x=0.5, xanchor='center'),
         xaxis_title=dict(text='<b>Rank</b>',                       font=dict(size=19, family='Arial', color='black')),
         yaxis_title=dict(text='<b>Number of Hit and Run Cases</b>', font=dict(size=19, family='Arial', color='black')),
-        height=650, template='plotly_white', showlegend=False,
+        height=600, template='plotly_white', showlegend=False,
         paper_bgcolor='white', plot_bgcolor='#f8f9fa',
+        uniformtext=dict(minsize=11, mode='hide'),
         xaxis=dict(showgrid=False, tickfont=dict(size=16, family='Arial Black', color='black'),
                    linecolor='black', linewidth=2.5, mirror=True,
                    tickmode='linear', tick0=1, dtick=1, range=[0.5, 10.5]),
         yaxis=dict(showgrid=True, gridwidth=1.5, gridcolor='rgba(200,200,200,0.4)',
                    tickfont=dict(size=16, family='Arial', color='black'),
                    linecolor='black', linewidth=2.5, mirror=True,
-                   zeroline=True, zerolinewidth=2, zerolinecolor='black', separatethousands=True),
+                   zeroline=True, zerolinewidth=2, zerolinecolor='black', separatethousands=True,
+                   range=[0, _max2 * 1.35]),
         margin=dict(l=80, r=40, t=90, b=80)
     )
     return fig1, fig2
 
 
 def create_fatality_ranking_plot(df, selected_year=None, selected_route=None):
-    filtered_df = df.copy()
+    filtered_df = df
     if selected_year  and selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['Year Of Crash'] == int(selected_year)]
     if selected_route and selected_route != "All Routes": filtered_df = filtered_df[filtered_df['Route'] == selected_route]
 
@@ -716,25 +1304,29 @@ def create_fatality_ranking_plot(df, selected_year=None, selected_route=None):
     fig.add_trace(go.Bar(
         x=fatality_counts['Rank'], y=fatality_counts['Total_Fatalities'],
         marker=dict(color=fatality_counts['Color'], line=dict(color='black', width=2)), width=0.6,
-        text=[f"<b>{seg}</b><br>{int(c):,} fatalities" for seg, c in zip(fatality_counts['Segment ID'], fatality_counts['Total_Fatalities'])],
-        textposition='outside', textfont=dict(size=14, color='black', family='Arial Black'),
-        hovertemplate='<b>Rank %{x}</b><br>MSLINK: %{customdata[0]}<br>Route: %{customdata[1]}<br>Fatalities: %{y:,.0f}<extra></extra>',
+        text=[f"<b>{seg}</b><br><b>{int(c):,}</b>" for seg, c in zip(fatality_counts['Segment ID'], fatality_counts['Total_Fatalities'])],
+        textposition='outside', textfont=dict(size=15, color='black', family='Arial Black'),
+        cliponaxis=False,
+        hovertemplate='<b>Rank %{x}</b><br>Segment: %{customdata[0]}<br>Route: %{customdata[1]}<br>Fatalities: %{y:,.0f}<extra></extra>',
         customdata=fatality_counts[['Segment ID', 'Route']].values
     ))
+    _maxf = fatality_counts['Total_Fatalities'].max() if len(fatality_counts) else 1
     fig.update_layout(
         title=dict(text='<b>✨ Top 10 Segments by Fatalities</b>',
                    font=dict(size=24, family='Arial', color='#dc3545'), x=0.5, xanchor='center'),
         xaxis_title=dict(text='<b>Rank</b>',                   font=dict(size=19, family='Arial', color='black')),
         yaxis_title=dict(text='<b>Number of Fatalities</b>', font=dict(size=19, family='Arial', color='black')),
-        height=650, template='plotly_white', showlegend=False,
+        height=600, template='plotly_white', showlegend=False,
         paper_bgcolor='white', plot_bgcolor='#f8f9fa',
+        uniformtext=dict(minsize=11, mode='hide'),
         xaxis=dict(showgrid=False, tickfont=dict(size=16, family='Arial Black', color='black'),
                    linecolor='black', linewidth=2.5, mirror=True,
                    tickmode='linear', tick0=1, dtick=1, range=[0.5, 10.5]),
         yaxis=dict(showgrid=True, gridwidth=1.5, gridcolor='rgba(200,200,200,0.4)',
                    tickfont=dict(size=16, family='Arial', color='black'),
                    linecolor='black', linewidth=2.5, mirror=True,
-                   zeroline=True, zerolinewidth=2, zerolinecolor='black', separatethousands=True),
+                   zeroline=True, zerolinewidth=2, zerolinecolor='black', separatethousands=True,
+                   range=[0, _maxf * 1.35]),
         margin=dict(l=80, r=40, t=90, b=80)
     )
     return fig
@@ -744,13 +1336,15 @@ def create_fatality_ranking_plot(df, selected_year=None, selected_route=None):
 # HOTSPOT MAP PLOTS
 # ============================================================================
 def create_crash_frequency_heatmap(df, selected_year=None, selected_route=None):
-    filtered_df = df.copy()
+    filtered_df = df
     if selected_year  and selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['year'] == int(selected_year)]
     if selected_route and selected_route != "All Routes": filtered_df = filtered_df[filtered_df['route'] == selected_route]
 
-    st.caption(f"📊 Displaying {len(filtered_df):,} crashes")
-    filtered_df['hover_text'] = (
-        '<b>MSLINK:</b> '    + filtered_df['segment_id'].astype(str) + '<br>' +
+    total = len(filtered_df)
+    if total > MAX_MAP_POINTS:
+        filtered_df = filtered_df.sample(MAX_MAP_POINTS, random_state=42)
+    hover_text = (
+        '<b>Segment:</b> '   + filtered_df['segment_id'].astype(str) + '<br>' +
         '<b>City:</b> '      + filtered_df['city'].astype(str)       + '<br>' +
         '<b>Route:</b> '     + filtered_df['route'].astype(str)      + '<br>' +
         '<b>Injuries:</b> '  + filtered_df['injuries'].astype(str)   + '<br>' +
@@ -761,14 +1355,9 @@ def create_crash_frequency_heatmap(df, selected_year=None, selected_route=None):
     fig.add_trace(go.Densitymapbox(
         lat=filtered_df['latitude'], lon=filtered_df['longitude'],
         radius=15, colorscale='Reds', showscale=True,
-        hoverinfo='skip', opacity=0.6,
+        text=hover_text, hovertemplate='%{text}<extra></extra>',
+        opacity=0.7,
         colorbar=dict(title="<b>Density</b>", thickness=15, len=0.7)
-    ))
-    fig.add_trace(go.Scattermapbox(
-        lat=filtered_df['latitude'], lon=filtered_df['longitude'], mode='markers',
-        marker=dict(size=4, color='rgba(255, 0, 0, 0.2)', opacity=0.3),
-        text=filtered_df['hover_text'],
-        hovertemplate='%{text}<extra></extra>', showlegend=False
     ))
     fig.update_layout(
         mapbox=dict(style="open-street-map", center=dict(lat=35.15, lon=-90.05), zoom=9),
@@ -780,26 +1369,35 @@ def create_crash_frequency_heatmap(df, selected_year=None, selected_route=None):
 
 
 def create_severity_scatter_map(df, selected_year=None, selected_route=None):
-    filtered_df = df.copy()
+    filtered_df = df
     if selected_year  and selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['year'] == int(selected_year)]
     if selected_route and selected_route != "All Routes": filtered_df = filtered_df[filtered_df['route'] == selected_route]
+
+    if len(filtered_df) > MAX_MAP_POINTS:
+        # Always keep fatal & incapacitating crashes; sample from the rest
+        priority = filtered_df['severity'].isin(['Fatal Injury', 'Incapacitating Injury'])
+        keep     = filtered_df[priority]
+        rest     = filtered_df[~priority]
+        remaining = max(0, MAX_MAP_POINTS - len(keep))
+        if remaining > 0 and len(rest) > remaining:
+            rest = rest.sample(remaining, random_state=42)
+        filtered_df = pd.concat([keep, rest])
 
     severity_colors = {
         'Fatal Injury': '#96092B', 'Incapacitating Injury': '#FF4500',
         'Non-Incapacitating Injury': '#FFD700', 'Possible Injury': '#32CD32',
         'Property Damage Only': '#1E90FF'
     }
-    filtered_df['marker_size'] = 10
     fig = px.scatter_mapbox(
         filtered_df, lat='latitude', lon='longitude',
         color='severity', color_discrete_map=severity_colors,
-        size='marker_size', size_max=10, hover_name='segment_id',
-        hover_data={'latitude': False, 'longitude': False, 'route': True, 'city': True,
-                    'severity': True, 'fatalities': True, 'injuries': True,
-                    'year': True, 'marker_size': False},
+        hover_name='segment_id',
+        hover_data={'latitude': False, 'longitude': False,
+                    'route': True, 'severity': True, 'fatalities': True, 'year': True},
         center=dict(lat=35.15, lon=-90.05), zoom=9,
         mapbox_style="open-street-map", height=700, opacity=0.85
     )
+    fig.update_traces(marker_size=10)
     fig.update_layout(
         title=dict(text='<b>✨ Crash Severity Map</b>',
                    font=dict(size=24, family='Arial', color='#1f77b4'), x=0.5, xanchor='center'),
@@ -812,7 +1410,7 @@ def create_severity_scatter_map(df, selected_year=None, selected_route=None):
 
 
 def create_segment_hotspot_map(df, selected_year=None, selected_route=None, top_n=10):
-    filtered_df = df.copy()
+    filtered_df = df
     if selected_year  and selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['year'] == int(selected_year)]
     if selected_route and selected_route != "All Routes": filtered_df = filtered_df[filtered_df['route'] == selected_route]
 
@@ -886,48 +1484,94 @@ def show_hotspot_maps_page():
 
     st.markdown("---")
 
-    tab1, tab2, tab3 = st.tabs(["🔅 Frequency Heatmap", "🔅 Severity Map", "🔅 Top Hotspots"])
+    map_choice = st.selectbox(
+        "Select Map View",
+        ["🔅 Frequency Heatmap", "🔅 Severity Map", "🔅 Top Hotspots"],
+        key="map_choice"
+    )
 
-    with tab1:
+    if map_choice == "🔅 Frequency Heatmap":
         st.markdown("#### 🔅 Crash Density Heatmap")
         st.markdown("*Red zones indicate areas with the highest concentration of crashes.*")
         st.plotly_chart(create_crash_frequency_heatmap(crash_df, selected_year, selected_route),
                         use_container_width=True)
 
-    with tab2:
+    elif map_choice == "🔅 Severity Map":
         st.markdown("#### 🔅 Crash Severity Distribution")
         st.markdown("*Each point represents a crash, coloured by severity level.*")
         st.plotly_chart(create_severity_scatter_map(crash_df, selected_year, selected_route),
                         use_container_width=True)
 
-    with tab3:
+    elif map_choice == "🔅 Top Hotspots":
         st.markdown(f"#### 🔅 Top {top_n} Highest-Risk Segments")
         st.plotly_chart(create_segment_hotspot_map(crash_df, selected_year, selected_route, top_n),
                         use_container_width=True)
 
-        filtered_df = crash_df.copy()
-        if selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['year']  == int(selected_year)]
-        if selected_route != "All Routes": filtered_df = filtered_df[filtered_df['route'] == selected_route]
-        seg_stats = filtered_df.groupby('segment_id').agg(
-            total_crashes=('severity', 'count'),
-            fatalities=('fatalities', 'sum'),
-            injuries=('injuries', 'sum')
-        ).reset_index().nlargest(top_n, 'total_crashes')
-        seg_stats['rank'] = range(1, len(seg_stats) + 1)
-        seg_stats = seg_stats.rename(columns={'segment_id': 'MSLINK'})[
-            ['rank', 'MSLINK', 'total_crashes', 'fatalities', 'injuries']]
-        st.markdown("##### 📋 Top Segments Summary Table")
-        st.dataframe(seg_stats.style.format(
-            {'total_crashes': '{:,.0f}', 'fatalities': '{:,.0f}', 'injuries': '{:,.0f}'}),
-            use_container_width=True, height=400)
+    # ── Summary table always visible (below whichever map is selected) ────────
+    st.markdown("---")
+    st.markdown(f"##### 📋 Top {top_n} Segments Summary Table")
+
+    _route_map = (crash_df[['segment_id', 'route']]
+                  .drop_duplicates('segment_id')
+                  .assign(segment_id=lambda d: d['segment_id'].astype(str))
+                  .set_index('segment_id')['route']
+                  .to_dict())
+
+    _filt = crash_df
+    if selected_year  != "All Years":  _filt = _filt[_filt['year']  == int(selected_year)]
+    if selected_route != "All Routes": _filt = _filt[_filt['route'] == selected_route]
+
+    seg_stats = (
+        _filt.groupby('segment_id', observed=True)
+        .agg(total_crashes=('severity', 'count'),
+             fatalities=('fatalities', 'sum'),
+             injuries=('injuries', 'sum'))
+        .reset_index()
+        .nlargest(top_n, 'total_crashes')
+    )
+    seg_stats['rank'] = range(1, len(seg_stats) + 1)
+    seg_stats['segment_id'] = seg_stats['segment_id'].astype(str)
+    seg_stats['Segment'] = seg_stats['segment_id'].apply(
+        lambda sid: f"{_route_map.get(sid, '')} {sid}".strip()
+    )
+    seg_stats = seg_stats.rename(columns={
+        'total_crashes': 'Total Crashes',
+        'fatalities': 'Fatalities',
+        'injuries': 'Injuries',
+        'rank': 'Rank'
+    })[['Rank', 'Segment', 'Total Crashes', 'Fatalities', 'Injuries']]
+    seg_stats['Total Crashes'] = seg_stats['Total Crashes'].fillna(0).apply(lambda x: f"{int(x):,}")
+    seg_stats['Fatalities']    = seg_stats['Fatalities'].fillna(0).apply(lambda x: f"{int(x):,}")
+    seg_stats['Injuries']      = seg_stats['Injuries'].fillna(0).apply(lambda x: f"{int(x):,}")
+
+    if seg_stats.empty:
+        st.info("No segment data available for the selected filters.")
+    else:
+        TH = ("background-color:#1f77b4;color:white;font-size:20px;font-weight:bold;"
+              "padding:14px 18px;text-align:center;border:1px solid #155a8a;")
+        header_html = "".join(f'<th style="{TH}">{c}</th>' for c in seg_stats.columns)
+        rows_html = ""
+        for i, row in enumerate(seg_stats.itertuples(index=False)):
+            bg  = "#f4f8ff" if i % 2 == 0 else "#ffffff"
+            TD  = (f"background-color:{bg};font-size:18px;"
+                   "padding:12px 18px;text-align:center;border-bottom:1px solid #d0d0d0;")
+            cells = "".join(f'<td style="{TD}">{v}</td>' for v in row)
+            rows_html += f"<tr>{cells}</tr>"
+        table_html = (
+            '<table style="width:100%;border-collapse:collapse;font-family:Arial;">'
+            f"<thead><tr>{header_html}</tr></thead>"
+            f"<tbody>{rows_html}</tbody>"
+            "</table>"
+        )
+        st.markdown(table_html, unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("### 🔅 Historical Background of Crash Data Analysis")
 
-    analysis_df = crash_df.rename(columns={
+    _needed = ['year', 'route', 'segment_id', 'hit_and_run', 'Date of Crash', 'Light Condition', 'fatalities']
+    analysis_df = crash_df[[c for c in _needed if c in crash_df.columns]].rename(columns={
         'year': 'Year Of Crash', 'route': 'Route',
-        'segment_id': 'Segment ID', 'hit_and_run': 'Hit and Run',
-        'fatalities': 'fatalities'
+        'segment_id': 'Segment ID', 'hit_and_run': 'Hit and Run'
     })
 
     st.markdown("#### 🔅 Monthly Crash Variation")
@@ -940,12 +1584,17 @@ def show_hotspot_maps_page():
                     use_container_width=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("#### 🔅 Top 10 MSLINK Rankings")
-    fig_crash, _ = create_segment_ranking_plots(analysis_df, selected_year, selected_route)
-    fig_fat      = create_fatality_ranking_plot(analysis_df,  selected_year, selected_route)
-    col_p1, col_p2 = st.columns(2)
-    with col_p1: st.plotly_chart(fig_crash, use_container_width=True)
-    with col_p2: st.plotly_chart(fig_fat,   use_container_width=True)
+    st.markdown("#### 🔅 Top 10 Segment Rankings")
+    fig_crash, fig_hitrun = create_segment_ranking_plots(analysis_df, selected_year, selected_route)
+    fig_fat               = create_fatality_ranking_plot(analysis_df, selected_year, selected_route)
+    st.plotly_chart(fig_crash,  use_container_width=True)
+    st.plotly_chart(fig_hitrun, use_container_width=True)
+    st.plotly_chart(fig_fat,    use_container_width=True)
+
+    show_crashbot_sidebar(
+        "chat_maps",
+        lambda msg: chatbot_crash_response(msg, st.session_state.crash_df)
+    )
 
     st.markdown("---")
     st.markdown("### 🔅 Key Insights")
@@ -980,7 +1629,7 @@ def show_hotspot_maps_page():
 # PAGE 2 — DAILY PROBABILISTIC CRASH PREDICTION
 # ============================================================================
 def show_forecast_page():
-    st.title("🏎️ Daily Traffic Crash Risk Prediction — Shelby County")
+    st.title("🏎️ Daily Traffic Crash Risk Prediction - Shelby County")
 
     mslinks = discover_mslinks()
     if not mslinks:
@@ -1005,8 +1654,8 @@ def show_forecast_page():
     with col_f2:
         available_mslinks = route_groups[selected_route]
         selected_mslink   = st.selectbox(
-            "Select MSLINK", available_mslinks,
-            format_func=lambda m: f"MSLINK {m}  ({mslink_route_map.get(str(m), '—')})",
+            "Select Segment", available_mslinks,
+            format_func=lambda m: f"Segment {m}  ({mslink_route_map.get(str(m), '—')})",
             key="fc_mslink"
         )
 
@@ -1014,12 +1663,12 @@ def show_forecast_page():
     historical_df = load_historical_data(selected_mslink)
 
     if future_df is None or future_df.empty:
-        st.error(f"No prediction data found for MSLINK {selected_mslink}.")
+        st.error(f"No prediction data found for Segment {selected_mslink}.")
         st.info(f"Expected: `{segment_folder(selected_mslink)}/data/MSLINK_{selected_mslink}_future_predictions_with_risk.csv`")
         return
 
     route_label = mslink_route_map.get(str(selected_mslink), "")
-    st.markdown(f"### 🔅 MSLINK **{selected_mslink}** &nbsp;|&nbsp; {route_label} &nbsp;|&nbsp; {len(future_df)}-day forecast")
+    st.markdown(f"### 🔅 Segment **{selected_mslink}** &nbsp;|&nbsp; {route_label} &nbsp;|&nbsp; {len(future_df)}-day forecast")
 
     min_date = future_df['date'].min().date()
     max_date = future_df['date'].max().date()
@@ -1061,7 +1710,7 @@ def show_forecast_page():
         st.plotly_chart(create_historical_plot(hist_filt), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
     else:
-        st.warning("No historical data available for this MSLINK.")
+        st.warning("No historical data available for this Segment.")
 
     st.markdown("---")
     st.subheader("🔅 Daily Probabilistic Crash Forecast")
@@ -1121,40 +1770,78 @@ def show_forecast_page():
         st.plotly_chart(create_probability_pie_chart(row), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.subheader("🔅 Uncertainty Breakdown")
-    ucols = ['model_uncertainty', 'residual_uncertainty', 'total_uncertainty']
-    if all(c in row.index for c in ucols):
-        uc1, uc2, uc3 = st.columns(3)
-        with uc1: st.metric("Model Uncertainty (σ_model)",    f"{row['model_uncertainty']:.4f}")
-        with uc2: st.metric("Residual Uncertainty (σ_resid)", f"{row['residual_uncertainty']:.4f}")
-        with uc3: st.metric("Total Uncertainty (σ_total)",    f"{row['total_uncertainty']:.4f}")
+    # ── Uncertainty Breakdown — commented out for now ──────────────────────────
+    # st.markdown("---")
+    # st.subheader("🔅 Uncertainty Breakdown")
+    # ucols = ['model_uncertainty', 'residual_uncertainty', 'total_uncertainty']
+    # if all(c in row.index for c in ucols):
+    #     uc1, uc2, uc3 = st.columns(3)
+    #     with uc1: st.metric("Model Uncertainty (σ_model)",    f"{row['model_uncertainty']:.4f}")
+    #     with uc2: st.metric("Residual Uncertainty (σ_resid)", f"{row['residual_uncertainty']:.4f}")
+    #     with uc3: st.metric("Total Uncertainty (σ_total)",    f"{row['total_uncertainty']:.4f}")
 
-    st.markdown("---")
-    st.subheader("🔅 Crash Probability Table")
-    prob_cols = {
-        'P(0 crashes)':  'prob_0_crash',  'P(1 crash)':    'prob_1_crash',
-        'P(2 crashes)':  'prob_2_crash',  'P(3 crashes)':  'prob_3_crash',
-        'P(≥4 crashes)': 'prob_ge4_crash',
-    }
-    prob_data = {k: f"{row.get(v, 0):.1f}%" for k, v in prob_cols.items()}
-    st.dataframe(pd.DataFrame(prob_data, index=[chosen]).T.rename(columns={chosen: 'Probability'}),
-                 use_container_width=True)
+    # ── Crash Probability Table — commented out for now ────────────────────────
+    # st.markdown("---")
+    # st.subheader("🔅 Crash Probability Table")
+    # prob_cols = {
+    #     'P(0 crashes)':  'prob_0_crash',  'P(1 crash)':    'prob_1_crash',
+    #     'P(2 crashes)':  'prob_2_crash',  'P(3 crashes)':  'prob_3_crash',
+    #     'P(≥4 crashes)': 'prob_ge4_crash',
+    # }
+    # prob_data = {k: f"{row.get(v, 0):.1f}%" for k, v in prob_cols.items()}
+    # st.dataframe(pd.DataFrame(prob_data, index=[chosen]).T.rename(columns={chosen: 'Probability'}),
+    #              use_container_width=True)
 
-    st.markdown("---")
-    st.subheader("📋 Full Forecast Table")
-    display_cols = ['date', 'lambda', 'predicted_lower', 'predicted_upper',
-                    'risk_level', 'method', 'most_likely_crashes', 'probability_%',
-                    'prob_0_crash', 'prob_1_crash', 'prob_2_crash',
-                    'prob_3_crash', 'prob_ge4_crash']
-    show_cols = [c for c in display_cols if c in future_filt.columns]
-    tbl = future_filt[show_cols].copy()
-    tbl['date'] = tbl['date'].dt.strftime('%Y-%m-%d')
-    st.dataframe(tbl.style.format({
-        'lambda': '{:.4f}', 'prob_0_crash': '{:.1f}%', 'prob_1_crash': '{:.1f}%',
-        'prob_2_crash': '{:.1f}%', 'prob_3_crash': '{:.1f}%',
-        'prob_ge4_crash': '{:.1f}%', 'probability_%': '{:.1f}%'
-    }), use_container_width=True, height=400)
+    # ── Full Forecast Table — commented out for now ────────────────────────────
+    # st.markdown("---")
+    # st.subheader("📋 Full Forecast Table")
+    # _tbl_cols = ['date', 'lambda', 'predicted_lower', 'predicted_upper', 'risk_level',
+    #              'method', 'most_likely_crashes']
+    # _show = [c for c in _tbl_cols if c in future_filt.columns]
+    # tbl = future_filt[_show].copy()
+    # tbl['date']   = tbl['date'].dt.strftime('%Y-%m-%d')
+    # if 'lambda' in tbl.columns:
+    #     tbl['lambda'] = tbl['lambda'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else '—')
+    # for _c in ['predicted_lower', 'predicted_upper', 'most_likely_crashes']:
+    #     if _c in tbl.columns:
+    #         tbl[_c] = tbl[_c].apply(lambda x: str(int(x)) if pd.notna(x) else '—')
+    # col_labels = {
+    #     'date': 'Date', 'lambda': 'λ (Expected)', 'predicted_lower': 'Lower (95%)',
+    #     'predicted_upper': 'Upper (95%)', 'risk_level': 'Risk Level',
+    #     'method': 'Method', 'most_likely_crashes': 'Most Likely Crashes'
+    # }
+    # tbl = tbl.rename(columns={k: v for k, v in col_labels.items() if k in tbl.columns})
+    # TH = ("background-color:#1f77b4;color:white;font-size:16px;font-weight:bold;"
+    #       "padding:10px 14px;text-align:center;border:1px solid #155a8a;white-space:nowrap;")
+    # _risk_colors = {'High': '#ffe0e0', 'Medium': '#fff3cd', 'Low': '#fff9e6', 'Very Low': '#e6f9ee'}
+    # header_html = "".join(f'<th style="{TH}">{c}</th>' for c in tbl.columns)
+    # rows_html = ""
+    # for i, row_t in enumerate(tbl.itertuples(index=False)):
+    #     vals = list(row_t)
+    #     risk_val = vals[tbl.columns.tolist().index('Risk Level')] if 'Risk Level' in tbl.columns.tolist() else ''
+    #     row_bg = _risk_colors.get(str(risk_val), ('#f4f8ff' if i % 2 == 0 else '#ffffff'))
+    #     cells = "".join(
+    #         f'<td style="background-color:{row_bg};font-size:15px;font-weight:bold;'
+    #         f'padding:9px 14px;text-align:center;border-bottom:1px solid #d0d0d0;">{v}</td>'
+    #         for v in vals
+    #     )
+    #     rows_html += f"<tr>{cells}</tr>"
+    # forecast_table_html = (
+    #     '<div style="overflow-x:auto;">'
+    #     '<table style="width:100%;border-collapse:collapse;font-family:Arial;">'
+    #     f"<thead><tr>{header_html}</tr></thead>"
+    #     f"<tbody>{rows_html}</tbody>"
+    #     "</table></div>"
+    # )
+    # st.markdown(forecast_table_html, unsafe_allow_html=True)
+
+    show_crashbot_sidebar(
+        "chat_forecast",
+        lambda msg: chatbot_forecast_response(
+            msg, future_df, historical_df, selected_mslink,
+            route_name=mslink_route_map.get(str(selected_mslink), '')
+        )
+    )
 
 
 # ============================================================================
@@ -1213,8 +1900,8 @@ def show_help_page():
         st.markdown("Crashes are random events — ranges reflect real uncertainty and help with flexible resource planning.")
     with st.expander("What does 95% confidence mean?"):
         st.markdown("In 95 out of 100 similar days, actual crashes will fall inside the predicted range.")
-    with st.expander("How is MSLINK used?"):
-        st.markdown("MSLINK is the unique road-segment identifier. Each MSLINK gets its own model trained on its own crash history.")
+    with st.expander("How is Segment used?"):
+        st.markdown("Each Segment is a unique road section identified by its MSLINK ID. Each Segment gets its own model trained on its own crash history.")
 
     st.markdown("---")
     st.info("**Support:** ctiermemphis@gmail.com | Mon–Fri 9 AM–5 PM CST | C-TIER, The University of Memphis")
@@ -1226,9 +1913,11 @@ def show_help_page():
 if __name__ == "__main__":
 
     # ---- Session state defaults ----
-    if 'authenticated'      not in st.session_state: st.session_state.authenticated = False
-    if 'crash_df'           not in st.session_state: st.session_state.crash_df = None
-    if 'crash_data_loaded'  not in st.session_state: st.session_state.crash_data_loaded = False
+    if 'authenticated'      not in st.session_state: st.session_state.authenticated      = False
+    if 'crash_df'           not in st.session_state: st.session_state.crash_df           = None
+    if 'crash_data_loaded'  not in st.session_state: st.session_state.crash_data_loaded  = False
+    if 'chat_maps'          not in st.session_state: st.session_state.chat_maps          = []
+    if 'chat_forecast'      not in st.session_state: st.session_state.chat_forecast      = []
 
     if not st.session_state.authenticated:
         login_page()
