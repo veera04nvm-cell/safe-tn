@@ -1335,7 +1335,35 @@ def create_fatality_ranking_plot(df, selected_year=None, selected_route=None):
 # ============================================================================
 # HOTSPOT MAP PLOTS
 # ============================================================================
-def create_crash_frequency_heatmap(df, selected_year=None, selected_route=None):
+def _add_highlight_marker(fig, highlight, zoom=14):
+    """
+    Shared helper: overlay a highlight marker on a mapbox figure and
+    recenter/zoom to it. `highlight` is a dict with keys:
+    segment_id, lat, lon, route (optional), label (optional).
+    Returns the (lat, lon, zoom) to use for the mapbox layout.
+    """
+    if not highlight:
+        return None
+    fig.add_trace(go.Scattermapbox(
+        lat=[highlight['lat']], lon=[highlight['lon']],
+        mode='markers',
+        marker=dict(size=26, color='#2563eb', opacity=0.95),
+        text=[highlight.get('label', str(highlight.get('segment_id', '')))],
+        hovertemplate='<b>Selected: %{text}</b><extra></extra>',
+        name='Selected segment',
+        showlegend=False,
+    ))
+    # A thin white ring behind it so it stands out against the density colors
+    fig.add_trace(go.Scattermapbox(
+        lat=[highlight['lat']], lon=[highlight['lon']],
+        mode='markers',
+        marker=dict(size=34, color='white', opacity=0.5),
+        hoverinfo='skip', showlegend=False,
+    ))
+    return dict(lat=highlight['lat'], lon=highlight['lon']), zoom
+
+
+def create_crash_frequency_heatmap(df, selected_year=None, selected_route=None, highlight=None):
     filtered_df = df
     if selected_year  and selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['year'] == int(selected_year)]
     if selected_route and selected_route != "All Routes": filtered_df = filtered_df[filtered_df['route'] == selected_route]
@@ -1359,8 +1387,14 @@ def create_crash_frequency_heatmap(df, selected_year=None, selected_route=None):
         opacity=0.7,
         colorbar=dict(title="<b>Density</b>", thickness=15, len=0.7)
     ))
+
+    center, zoom = dict(lat=35.15, lon=-90.05), 9
+    hl = _add_highlight_marker(fig, highlight, zoom=14)
+    if hl:
+        center, zoom = hl
+
     fig.update_layout(
-        mapbox=dict(style="open-street-map", center=dict(lat=35.15, lon=-90.05), zoom=9),
+        mapbox=dict(style="open-street-map", center=center, zoom=zoom),
         title=dict(text='<b>✨ Crash Frequency Heatmap</b>',
                    font=dict(size=24, family='Arial', color='#1f77b4'), x=0.5, xanchor='center'),
         height=700, margin=dict(l=0, r=0, t=60, b=0), paper_bgcolor='white', hovermode='closest'
@@ -1368,7 +1402,7 @@ def create_crash_frequency_heatmap(df, selected_year=None, selected_route=None):
     return fig
 
 
-def create_severity_scatter_map(df, selected_year=None, selected_route=None):
+def create_severity_scatter_map(df, selected_year=None, selected_route=None, highlight=None):
     filtered_df = df
     if selected_year  and selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['year'] == int(selected_year)]
     if selected_route and selected_route != "All Routes": filtered_df = filtered_df[filtered_df['route'] == selected_route]
@@ -1398,6 +1432,13 @@ def create_severity_scatter_map(df, selected_year=None, selected_route=None):
         mapbox_style="open-street-map", height=700, opacity=0.85
     )
     fig.update_traces(marker_size=10)
+
+    center, zoom = dict(lat=35.15, lon=-90.05), 9
+    hl = _add_highlight_marker(fig, highlight, zoom=14)
+    if hl:
+        center, zoom = hl
+        fig.update_layout(mapbox=dict(center=center, zoom=zoom))
+
     fig.update_layout(
         title=dict(text='<b>✨ Crash Severity Map</b>',
                    font=dict(size=24, family='Arial', color='#1f77b4'), x=0.5, xanchor='center'),
@@ -1409,7 +1450,7 @@ def create_severity_scatter_map(df, selected_year=None, selected_route=None):
     return fig
 
 
-def create_segment_hotspot_map(df, selected_year=None, selected_route=None, top_n=10):
+def create_segment_hotspot_map(df, selected_year=None, selected_route=None, top_n=10, highlight=None):
     filtered_df = df
     if selected_year  and selected_year  != "All Years":  filtered_df = filtered_df[filtered_df['year'] == int(selected_year)]
     if selected_route and selected_route != "All Routes": filtered_df = filtered_df[filtered_df['route'] == selected_route]
@@ -1441,6 +1482,13 @@ def create_segment_hotspot_map(df, selected_year=None, selected_route=None, top_
             textfont=dict(size=14, color='white', family='Arial Black'),
             showlegend=False, hoverinfo='skip'
         ))
+
+    center, zoom = dict(lat=35.15, lon=-90.05), 9
+    hl = _add_highlight_marker(fig, highlight, zoom=14)
+    if hl:
+        center, zoom = hl
+        fig.update_layout(mapbox=dict(center=center, zoom=zoom))
+
     fig.update_layout(
         title=dict(text=f'<b>✨ Top {top_n} Crash Hotspot Segments</b>',
                    font=dict(size=24, family='Arial', color='#1f77b4'), x=0.5, xanchor='center'),
@@ -1484,33 +1532,11 @@ def show_hotspot_maps_page():
 
     st.markdown("---")
 
-    map_choice = st.selectbox(
-        "Select Map View",
-        ["🔅 Frequency Heatmap", "🔅 Severity Map", "🔅 Top Hotspots"],
-        key="map_choice"
-    )
-
-    if map_choice == "🔅 Frequency Heatmap":
-        st.markdown("#### 🔅 Crash Density Heatmap")
-        st.markdown("*Red zones indicate areas with the highest concentration of crashes.*")
-        st.plotly_chart(create_crash_frequency_heatmap(crash_df, selected_year, selected_route),
-                        use_container_width=True)
-
-    elif map_choice == "🔅 Severity Map":
-        st.markdown("#### 🔅 Crash Severity Distribution")
-        st.markdown("*Each point represents a crash, coloured by severity level.*")
-        st.plotly_chart(create_severity_scatter_map(crash_df, selected_year, selected_route),
-                        use_container_width=True)
-
-    elif map_choice == "🔅 Top Hotspots":
-        st.markdown(f"#### 🔅 Top {top_n} Highest-Risk Segments")
-        st.plotly_chart(create_segment_hotspot_map(crash_df, selected_year, selected_route, top_n),
-                        use_container_width=True)
-
-    # ── Summary table always visible (below whichever map is selected) ────────
-    st.markdown("---")
-    st.markdown(f"##### 📋 Top {top_n} Segments Summary Table")
-
+    # ------------------------------------------------------------------
+    # Compute the Top-N segment summary data BEFORE the map is drawn, so
+    # a previously-selected row (from the table widget's persisted
+    # session_state) can be turned into a highlight marker on this run.
+    # ------------------------------------------------------------------
     _route_map = (crash_df[['segment_id', 'route']]
                   .drop_duplicates('segment_id')
                   .assign(segment_id=lambda d: d['segment_id'].astype(str))
@@ -1525,45 +1551,98 @@ def show_hotspot_maps_page():
         _filt.groupby('segment_id', observed=True)
         .agg(total_crashes=('severity', 'count'),
              fatalities=('fatalities', 'sum'),
-             injuries=('injuries', 'sum'))
+             injuries=('injuries', 'sum'),
+             latitude=('latitude', 'mean'),
+             longitude=('longitude', 'mean'))
         .reset_index()
         .nlargest(top_n, 'total_crashes')
+        .reset_index(drop=True)
     )
     seg_stats['rank'] = range(1, len(seg_stats) + 1)
     seg_stats['segment_id'] = seg_stats['segment_id'].astype(str)
     seg_stats['Segment'] = seg_stats['segment_id'].apply(
         lambda sid: f"{_route_map.get(sid, '')} {sid}".strip()
     )
-    seg_stats = seg_stats.rename(columns={
-        'total_crashes': 'Total Crashes',
-        'fatalities': 'Fatalities',
-        'injuries': 'Injuries',
-        'rank': 'Rank'
-    })[['Rank', 'Segment', 'Total Crashes', 'Fatalities', 'Injuries']]
-    seg_stats['Total Crashes'] = seg_stats['Total Crashes'].fillna(0).apply(lambda x: f"{int(x):,}")
-    seg_stats['Fatalities']    = seg_stats['Fatalities'].fillna(0).apply(lambda x: f"{int(x):,}")
-    seg_stats['Injuries']      = seg_stats['Injuries'].fillna(0).apply(lambda x: f"{int(x):,}")
+
+    # Reset the highlight if the current filters no longer contain the
+    # previously-selected segment (e.g. user switched Route/Year).
+    if st.session_state.get('selected_map_segment') is not None:
+        if st.session_state.selected_map_segment['segment_id'] not in seg_stats['segment_id'].values:
+            st.session_state.selected_map_segment = None
+
+    highlight = st.session_state.get('selected_map_segment')
+
+    map_choice = st.selectbox(
+        "Select Map View",
+        ["🔅 Frequency Heatmap", "🔅 Severity Map", "🔅 Top Hotspots"],
+        key="map_choice"
+    )
+
+    if highlight:
+        colh1, colh2 = st.columns([5, 1])
+        with colh1:
+            st.info(f"✨ Map focused on **{highlight['label']}** - click another row below to change, "
+                    f"or clear the selection.")
+        with colh2:
+            if st.button("Clear focus", use_container_width=True):
+                st.session_state.selected_map_segment = None
+                st.rerun()
+
+    if map_choice == "🔅 Frequency Heatmap":
+        st.markdown("#### 🔅 Crash Density Heatmap")
+        st.markdown("*Red zones indicate areas with the highest concentration of crashes.*")
+        st.plotly_chart(create_crash_frequency_heatmap(crash_df, selected_year, selected_route, highlight=highlight),
+                        use_container_width=True)
+
+    elif map_choice == "🔅 Severity Map":
+        st.markdown("#### 🔅 Crash Severity Distribution")
+        st.markdown("*Each point represents a crash, coloured by severity level.*")
+        st.plotly_chart(create_severity_scatter_map(crash_df, selected_year, selected_route, highlight=highlight),
+                        use_container_width=True)
+
+    elif map_choice == "🔅 Top Hotspots":
+        st.markdown(f"#### 🔅 Top {top_n} Highest-Risk Segments")
+        st.plotly_chart(create_segment_hotspot_map(crash_df, selected_year, selected_route, top_n, highlight=highlight),
+                        use_container_width=True)
+
+    # ── Summary table — now a clickable st.dataframe, linked to the map ──────
+    st.markdown("---")
+    st.markdown(f"##### 📋 Top {top_n} Segments Summary Table  \n*✨ Click a row to focus the map above on that segment.*")
 
     if seg_stats.empty:
         st.info("No segment data available for the selected filters.")
     else:
-        TH = ("background-color:#1f77b4;color:white;font-size:20px;font-weight:bold;"
-              "padding:14px 18px;text-align:center;border:1px solid #155a8a;")
-        header_html = "".join(f'<th style="{TH}">{c}</th>' for c in seg_stats.columns)
-        rows_html = ""
-        for i, row in enumerate(seg_stats.itertuples(index=False)):
-            bg  = "#f4f8ff" if i % 2 == 0 else "#ffffff"
-            TD  = (f"background-color:{bg};font-size:18px;"
-                   "padding:12px 18px;text-align:center;border-bottom:1px solid #d0d0d0;")
-            cells = "".join(f'<td style="{TD}">{v}</td>' for v in row)
-            rows_html += f"<tr>{cells}</tr>"
-        table_html = (
-            '<table style="width:100%;border-collapse:collapse;font-family:Arial;">'
-            f"<thead><tr>{header_html}</tr></thead>"
-            f"<tbody>{rows_html}</tbody>"
-            "</table>"
+        display_df = seg_stats[['rank', 'Segment', 'total_crashes', 'fatalities', 'injuries']].rename(columns={
+            'rank': 'Rank', 'total_crashes': 'Total Crashes',
+            'fatalities': 'Fatalities', 'injuries': 'Injuries'
+        })
+
+        table_event = st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="segment_summary_table",
+            column_config={
+                "Total Crashes": st.column_config.NumberColumn(format="%d"),
+                "Fatalities":    st.column_config.NumberColumn(format="%d"),
+                "Injuries":      st.column_config.NumberColumn(format="%d"),
+            },
         )
-        st.markdown(table_html, unsafe_allow_html=True)
+
+        selected_rows = table_event.selection.rows if hasattr(table_event, "selection") else []
+        if selected_rows:
+            sel_row = seg_stats.iloc[selected_rows[0]]
+            new_highlight = {
+                'segment_id': sel_row['segment_id'],
+                'lat': float(sel_row['latitude']),
+                'lon': float(sel_row['longitude']),
+                'label': sel_row['Segment'],
+            }
+            if st.session_state.get('selected_map_segment') != new_highlight:
+                st.session_state.selected_map_segment = new_highlight
+                st.rerun()
 
     st.markdown("---")
     st.markdown("### 🔅 Historical Background of Crash Data Analysis")
@@ -1770,71 +1849,6 @@ def show_forecast_page():
         st.plotly_chart(create_probability_pie_chart(row), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Uncertainty Breakdown — commented out for now ──────────────────────────
-    # st.markdown("---")
-    # st.subheader("🔅 Uncertainty Breakdown")
-    # ucols = ['model_uncertainty', 'residual_uncertainty', 'total_uncertainty']
-    # if all(c in row.index for c in ucols):
-    #     uc1, uc2, uc3 = st.columns(3)
-    #     with uc1: st.metric("Model Uncertainty (σ_model)",    f"{row['model_uncertainty']:.4f}")
-    #     with uc2: st.metric("Residual Uncertainty (σ_resid)", f"{row['residual_uncertainty']:.4f}")
-    #     with uc3: st.metric("Total Uncertainty (σ_total)",    f"{row['total_uncertainty']:.4f}")
-
-    # ── Crash Probability Table — commented out for now ────────────────────────
-    # st.markdown("---")
-    # st.subheader("🔅 Crash Probability Table")
-    # prob_cols = {
-    #     'P(0 crashes)':  'prob_0_crash',  'P(1 crash)':    'prob_1_crash',
-    #     'P(2 crashes)':  'prob_2_crash',  'P(3 crashes)':  'prob_3_crash',
-    #     'P(≥4 crashes)': 'prob_ge4_crash',
-    # }
-    # prob_data = {k: f"{row.get(v, 0):.1f}%" for k, v in prob_cols.items()}
-    # st.dataframe(pd.DataFrame(prob_data, index=[chosen]).T.rename(columns={chosen: 'Probability'}),
-    #              use_container_width=True)
-
-    # ── Full Forecast Table — commented out for now ────────────────────────────
-    # st.markdown("---")
-    # st.subheader("📋 Full Forecast Table")
-    # _tbl_cols = ['date', 'lambda', 'predicted_lower', 'predicted_upper', 'risk_level',
-    #              'method', 'most_likely_crashes']
-    # _show = [c for c in _tbl_cols if c in future_filt.columns]
-    # tbl = future_filt[_show].copy()
-    # tbl['date']   = tbl['date'].dt.strftime('%Y-%m-%d')
-    # if 'lambda' in tbl.columns:
-    #     tbl['lambda'] = tbl['lambda'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else '—')
-    # for _c in ['predicted_lower', 'predicted_upper', 'most_likely_crashes']:
-    #     if _c in tbl.columns:
-    #         tbl[_c] = tbl[_c].apply(lambda x: str(int(x)) if pd.notna(x) else '—')
-    # col_labels = {
-    #     'date': 'Date', 'lambda': 'λ (Expected)', 'predicted_lower': 'Lower (95%)',
-    #     'predicted_upper': 'Upper (95%)', 'risk_level': 'Risk Level',
-    #     'method': 'Method', 'most_likely_crashes': 'Most Likely Crashes'
-    # }
-    # tbl = tbl.rename(columns={k: v for k, v in col_labels.items() if k in tbl.columns})
-    # TH = ("background-color:#1f77b4;color:white;font-size:16px;font-weight:bold;"
-    #       "padding:10px 14px;text-align:center;border:1px solid #155a8a;white-space:nowrap;")
-    # _risk_colors = {'High': '#ffe0e0', 'Medium': '#fff3cd', 'Low': '#fff9e6', 'Very Low': '#e6f9ee'}
-    # header_html = "".join(f'<th style="{TH}">{c}</th>' for c in tbl.columns)
-    # rows_html = ""
-    # for i, row_t in enumerate(tbl.itertuples(index=False)):
-    #     vals = list(row_t)
-    #     risk_val = vals[tbl.columns.tolist().index('Risk Level')] if 'Risk Level' in tbl.columns.tolist() else ''
-    #     row_bg = _risk_colors.get(str(risk_val), ('#f4f8ff' if i % 2 == 0 else '#ffffff'))
-    #     cells = "".join(
-    #         f'<td style="background-color:{row_bg};font-size:15px;font-weight:bold;'
-    #         f'padding:9px 14px;text-align:center;border-bottom:1px solid #d0d0d0;">{v}</td>'
-    #         for v in vals
-    #     )
-    #     rows_html += f"<tr>{cells}</tr>"
-    # forecast_table_html = (
-    #     '<div style="overflow-x:auto;">'
-    #     '<table style="width:100%;border-collapse:collapse;font-family:Arial;">'
-    #     f"<thead><tr>{header_html}</tr></thead>"
-    #     f"<tbody>{rows_html}</tbody>"
-    #     "</table></div>"
-    # )
-    # st.markdown(forecast_table_html, unsafe_allow_html=True)
-
     show_crashbot_sidebar(
         "chat_forecast",
         lambda msg: chatbot_forecast_response(
@@ -1918,6 +1932,7 @@ if __name__ == "__main__":
     if 'crash_data_loaded'  not in st.session_state: st.session_state.crash_data_loaded  = False
     if 'chat_maps'          not in st.session_state: st.session_state.chat_maps          = []
     if 'chat_forecast'      not in st.session_state: st.session_state.chat_forecast      = []
+    if 'selected_map_segment' not in st.session_state: st.session_state.selected_map_segment = None
 
     if not st.session_state.authenticated:
         login_page()
